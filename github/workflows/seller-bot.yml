@@ -1,0 +1,64 @@
+
+name: ZarinMah Seller Bot
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: zarinmah-seller-poll
+  cancel-in-progress: false
+
+jobs:
+  seller-bot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+
+    steps:
+      - name: Get source code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependency
+        run: pip install requests
+
+      - name: Check Telegram webhook
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+        run: |
+          python - <<'PY'
+          import os
+          import requests
+
+          token = os.environ["TELEGRAM_BOT_TOKEN"]
+          url = f"https://api.telegram.org/bot{token}/getWebhookInfo"
+          response = requests.get(url, timeout=20)
+          response.raise_for_status()
+          result = response.json()
+
+          if not result.get("ok"):
+              raise SystemExit("Telegram webhook check failed.")
+
+          webhook = result["result"].get("url", "")
+          if webhook:
+              raise SystemExit(
+                  "A Telegram webhook is active. "
+                  "Polling was stopped without changing the webhook."
+              )
+
+          print("Webhook is inactive. Polling may proceed.")
+          PY
+
+      - name: Run seller bot
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          SELLER_DATA_TOKEN: ${{ secrets.SELLER_DATA_TOKEN }}
+        run: python seller_bot.py
