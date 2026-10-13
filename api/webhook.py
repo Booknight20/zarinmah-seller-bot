@@ -95,7 +95,7 @@ def load_state():
     state = json.loads(content)
 
     if "last_update_id" not in state:
-    state["last_update_id"] = int(state.get("offset", 0)) - 1
+        state["last_update_id"] = int(state.get("offset", 0)) - 1
     state.setdefault("users", {})
     state.setdefault("listings", [])
     state.setdefault("next_id", 1)
