@@ -96,7 +96,6 @@ def load_state():
 
     state = json.loads(content)
 
-    # سازگاری با داده‌های نسخه قبلی
     if "last_update_id" not in state:
         state["last_update_id"] = (
             int(state.get("offset", 0)) - 1
@@ -106,11 +105,11 @@ def load_state():
     state.setdefault("listings", [])
     state.setdefault("next_id", 1)
 
-    # شناسه بعدی باید از تمام آگهی‌های موجود بزرگ‌تر باشد.
     existing_ids = [
         int(item.get("id", 0))
         for item in state["listings"]
     ]
+
     if existing_ids:
         state["next_id"] = max(
             int(state["next_id"]),
@@ -170,8 +169,11 @@ def start_listing(chat_id, user, kind):
 
     send_message(
         chat_id,
-        "📝 عنوان محصول را بفرست.\n"
-        "مثال: انگشتر طلای ۱۸ عیار",
+        "📝 ثبت آگهی فروش زرین ماه\n\n"
+        "مرحله ۱ از ۶\n"
+        "عنوان محصول را بفرست.\n"
+        "مثال: انگشتر طلای ۱۸ عیار\n\n"
+        "برای لغو عملیات، /cancel را بفرست.",
     )
 
 
@@ -180,7 +182,9 @@ def publish_listing(listing):
     description = html.escape(
         str(listing.get("description", ""))
     )
-    weight = html.escape(str(listing.get("weight", "ثبت نشده")))
+    weight = html.escape(
+        str(listing.get("weight", "ثبت نشده"))
+    )
     price = html.escape(str(listing.get("price", "")))
     contact = html.escape(str(listing.get("contact", "")))
 
@@ -301,12 +305,30 @@ def handle_message(state, message):
         )
         return None
 
-    if text == "/start":
+    # پشتیبانی از /start، /start sell و /start@BotUsername sell
+    command_parts = text.split(maxsplit=1)
+    command = command_parts[0].split("@", 1)[0] if command_parts else ""
+    payload = (
+        command_parts[1].strip().lower()
+        if len(command_parts) > 1
+        else ""
+    )
+
+    if command == "/start":
         cancel_flow(user)
+
+        # لینک مستقیم ثبت آگهی:
+        # https://t.me/ZarinMahGoldBot?start=sell
+        if payload == "sell":
+            start_listing(chat_id, user, "user")
+            return None
+
         send_message(
             chat_id,
             "سلام! به ربات فروشندگان زرین ماه خوش آمدی. 🌙\n\n"
             "برای ثبت آگهی، گزینهٔ «ثبت آگهی فروش» را بزن.\n"
+            "اگر از لینک مستقیم ثبت آگهی وارد شده‌ای، "
+            "می‌توانی از لینک ثبت آگهی استفاده کنی.\n\n"
             "آگهی کاربران پس از تأیید مدیر منتشر می‌شود.",
             main_keyboard(is_admin),
         )
@@ -432,7 +454,9 @@ def handle_message(state, message):
             )
             return None
 
-        draft["weight"] = f"{weight_value:.4f}".rstrip("0").rstrip(".")
+        draft["weight"] = (
+            f"{weight_value:.4f}".rstrip("0").rstrip(".")
+        )
         user["flow"] = "price"
         send_message(chat_id, "💰 قیمت پیشنهادی را بفرست.")
 
@@ -520,12 +544,10 @@ def handle_callback(state, callback, sha, update_id):
         return sha
 
     if action == "approve":
-        # سازگاری با آگهی‌های قدیمی که وزن ندارند.
         listing.setdefault("weight", "ثبت نشده")
         listing["status"] = "publishing"
         state["last_update_id"] = update_id
 
-        # انتشار فقط بعد از ذخیره موفق شروع می‌شود.
         sha = save_state(state, sha)
 
         publish_listing(listing)
@@ -619,25 +641,23 @@ class handler(BaseHTTPRequestHandler):
 
             if "callback_query" in update:
                 callback = update["callback_query"]
-                action_data = callback.get("data", "")
-
-                if action_data.startswith("approve:"):
-                    handle_callback(
-                        state, callback, sha, update_id
-                    )
-                    self.respond(200, "OK")
-                    return
 
                 handle_callback(
                     state, callback, sha, update_id
                 )
+
+                # وضعیت نهایی آپدیت ذخیره می‌شود.
+                state["last_update_id"] = update_id
+                sha = save_state(state, sha)
+
+                self.respond(200, "OK")
+                return
 
             elif "message" in update:
                 admin_listing_id = handle_message(
                     state, update["message"]
                 )
 
-            # ابتدا وضعیت ثبت اولیه و شناسه آپدیت ذخیره می‌شود.
             state["last_update_id"] = update_id
             sha = save_state(state, sha)
 
@@ -651,8 +671,6 @@ class handler(BaseHTTPRequestHandler):
                 )
 
                 if listing and listing.get("status") == "publishing":
-                    # اگر درخواست انتشار خطا بدهد، وضعیت publishing
-                    # برای بررسی دستی باقی می‌ماند.
                     publish_listing(listing)
 
                     listing["status"] = "published"
