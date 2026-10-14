@@ -1,0 +1,57 @@
+
+name: Register Telegram Webhook
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  register-webhook:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Register webhook securely
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_WEBHOOK_SECRET: ${{ secrets.TELEGRAM_WEBHOOK_SECRET }}
+        run: |
+          python - <<'PY'
+          import os
+          import requests
+
+          token = os.environ["TELEGRAM_BOT_TOKEN"]
+          secret = os.environ["TELEGRAM_WEBHOOK_SECRET"]
+
+          if not token or not secret:
+              raise SystemExit("Required GitHub Secrets are missing.")
+
+          allowed = set(
+              "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+              "abcdefghijklmnopqrstuvwxyz"
+              "0123456789_-"
+          )
+          if not (1 <= len(secret) <= 256) or not set(secret) <= allowed:
+              raise SystemExit(
+                  "Webhook secret must be 1-256 characters "
+                  "using only letters, numbers, _ and -."
+              )
+
+          response = requests.post(
+              f"https://api.telegram.org/bot{token}/setWebhook",
+              json={
+                  "url": "https://zarinmah-seller-bot.vercel.app/api/webhook",
+                  "secret_token": secret,
+                  "allowed_updates": ["message", "callback_query"],
+              },
+              timeout=30,
+          )
+          response.raise_for_status()
+          result = response.json()
+
+          if not result.get("ok"):
+              raise SystemExit("Telegram rejected the webhook registration.")
+
+          print("Webhook registration request succeeded.")
+          print("Webhook URL configured.")
+          PY
