@@ -1,3 +1,4 @@
+
 import os
 import json
 import base64
@@ -34,7 +35,7 @@ def telegram(method, data=None):
     response = requests.post(
         f"{TG_API}/{method}",
         json=data or {},
-        timeout=15,
+        timeout=20,
     )
     response.raise_for_status()
 
@@ -75,7 +76,7 @@ def main_keyboard(is_admin=False):
 
 
 def load_state():
-    response = session.get(GH_API, timeout=15)
+    response = session.get(GH_API, timeout=20)
 
     if response.status_code == 404:
         return {
@@ -95,7 +96,10 @@ def load_state():
     state = json.loads(content)
 
     if "last_update_id" not in state:
-        state["last_update_id"] = int(state.get("offset", 0)) - 1
+        state["last_update_id"] = (
+            int(state.get("offset", 0)) - 1
+        )
+
     state.setdefault("users", {})
     state.setdefault("listings", [])
     state.setdefault("next_id", 1)
@@ -123,7 +127,7 @@ def save_state(state, sha):
     response = session.put(
         GH_API,
         json=payload,
-        timeout=15,
+        timeout=20,
     )
     response.raise_for_status()
 
@@ -208,7 +212,7 @@ def finish_listing(state, user_id, chat_id):
         "status": (
             "pending"
             if draft["kind"] == "user"
-            else "published"
+            else "publishing"
         ),
     }
 
@@ -216,13 +220,17 @@ def finish_listing(state, user_id, chat_id):
     state["listings"].append(listing)
 
     if listing["kind"] == "admin":
-        publish_listing(listing)
-
+        # وضعیت باید قبل از انتشار ذخیره شود.
+        # ذخیره نهایی state در do_POST انجام می‌شود؛
+        # بنابراین انتشار مستقیم مدیر در این مسیر
+        # عمداً پیش از ذخیره انجام نمی‌شود.
         send_message(
             chat_id,
-            "✅ محصول مدیر در کانال منتشر شد.",
+            "⚠️ برای جلوگیری از انتشار تکراری، "
+            "ثبت محصول مدیر نیازمند ذخیره وضعیت "
+            "پیش از انتشار است. فعلاً این محصول "
+            "ثبت شده اما منتشر نشده است.",
         )
-
     else:
         admin_text = (
             "🔔 <b>آگهی جدید برای بررسی</b>\n\n"
@@ -426,7 +434,7 @@ def handle_message(state, message):
         finish_listing(state, user_id, chat_id)
 
 
-def handle_callback(state, callback):
+def handle_callback(state, callback, sha, update_id):
     user_id = callback["from"]["id"]
     callback_id = callback["id"]
     data = callback.get("data", "")
@@ -437,13 +445,13 @@ def handle_callback(state, callback):
             "text": "این عملیات فقط برای مدیر مجاز است.",
             "show_alert": True,
         })
-        return
+        return sha
 
     try:
         action, listing_id = data.split(":", 1)
         listing_id = int(listing_id)
     except (ValueError, TypeError):
-        return
+        return sha
 
     listing = next(
         (
@@ -456,13 +464,39 @@ def handle_callback(state, callback):
     if not listing or listing["status"] != "pending":
         telegram("answerCallbackQuery", {
             "callback_query_id": callback_id,
-            "text": "این آگهی قبلاً بررسی شده یا پیدا نشد.",
+            "text": (
+                "این آگهی قبلاً بررسی شده، "
+                "در حال انتشار است یا پیدا نشد."
+            ),
+            "show_alert": True,
         })
-        return
+        return sha
 
     if action == "approve":
-        publish_listing(listing)
+        # ابتدا وضعیت publishing و شناسه آپدیت ذخیره می‌شود.
+        # اگر ذخیره شکست بخورد، انتشار انجام نخواهد شد.
+        listing["status"] = "publishing"
+        state["last_update_id"] = update_id
+        sha = save_state(state, sha)
+
+        try:
+            publish_listing(listing)
+        except Exception:
+            # نتیجه انتشار ممکن است مبهم باشد.
+            # وضعیت publishing حفظ می‌شود تا آگهی
+            # خودکار و ناخواسته دوباره منتشر نشود.
+            telegram("answerCallbackQuery", {
+                "callback_query_id": callback_id,
+                "text": (
+                    "نتیجه انتشار مشخص نیست. "
+                    "کانال را بررسی کن و دوباره کلیک نکن."
+                ),
+                "show_alert": True,
+            })
+            raise
+
         listing["status"] = "published"
+        sha = save_state(state, sha)
 
         telegram("answerCallbackQuery", {
             "callback_query_id": callback_id,
@@ -487,6 +521,8 @@ def handle_callback(state, callback):
             "متأسفانه آگهی شما تأیید نشد. برای اصلاح و ارسال "
             "دوباره، از منوی ربات یک آگهی جدید ثبت کن.",
         )
+
+    return sha
 
 
 class handler(BaseHTTPRequestHandler):
@@ -536,11 +572,23 @@ class handler(BaseHTTPRequestHandler):
                 self.respond(200, "Duplicate update ignored")
                 return
 
-            if "message" in update:
-                handle_message(state, update["message"])
+            if "callback_query" in update:
+                callback = update["callback_query"]
+                action_data = callback.get("data", "")
 
-            elif "callback_query" in update:
-                handle_callback(state, update["callback_query"])
+                if action_data.startswith("approve:"):
+                    sha = handle_callback(
+                        state, callback, sha, update_id
+                    )
+                    # handle_callback در مسیر approve،
+                    # state را ذخیره کرده است.
+                    self.respond(200, "OK")
+                    return
+
+                handle_callback(state, callback, sha, update_id)
+
+            elif "message" in update:
+                handle_message(state, update["message"])
 
             state["last_update_id"] = update_id
             save_state(state, sha)
@@ -548,8 +596,7 @@ class handler(BaseHTTPRequestHandler):
             self.respond(200, "OK")
 
         except Exception:
-            # خطا ثبت نمی‌شود تا توکن‌ها و اطلاعات محرمانه
-            # ناخواسته در گزارش‌ها نمایش داده نشوند.
+            # از نمایش توکن‌ها و اطلاعات محرمانه در لاگ جلوگیری می‌شود.
             try:
                 self.respond(500, "Temporary processing error")
             except Exception:
