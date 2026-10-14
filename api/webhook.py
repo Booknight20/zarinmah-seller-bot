@@ -4,6 +4,7 @@ import json
 import base64
 import html
 import hmac
+import re
 import requests
 
 from http.server import BaseHTTPRequestHandler
@@ -95,6 +96,7 @@ def load_state():
 
     state = json.loads(content)
 
+    # سازگاری با داده‌های نسخه قبلی
     if "last_update_id" not in state:
         state["last_update_id"] = (
             int(state.get("offset", 0)) - 1
@@ -103,6 +105,17 @@ def load_state():
     state.setdefault("users", {})
     state.setdefault("listings", [])
     state.setdefault("next_id", 1)
+
+    # شناسه بعدی باید از تمام آگهی‌های موجود بزرگ‌تر باشد.
+    existing_ids = [
+        int(item.get("id", 0))
+        for item in state["listings"]
+    ]
+    if existing_ids:
+        state["next_id"] = max(
+            int(state["next_id"]),
+            max(existing_ids) + 1,
+        )
 
     return state, item["sha"]
 
@@ -163,12 +176,15 @@ def start_listing(chat_id, user, kind):
 
 
 def publish_listing(listing):
-    title = html.escape(listing["title"])
-    description = html.escape(listing["description"])
-    price = html.escape(listing["price"])
-    contact = html.escape(listing["contact"])
+    title = html.escape(str(listing.get("title", "")))
+    description = html.escape(
+        str(listing.get("description", ""))
+    )
+    weight = html.escape(str(listing.get("weight", "ثبت نشده")))
+    price = html.escape(str(listing.get("price", "")))
+    contact = html.escape(str(listing.get("contact", "")))
 
-    if listing["kind"] == "admin":
+    if listing.get("kind") == "admin":
         label = "محصول مدیر زرین ماه"
     else:
         label = "آگهی فروش کاربر"
@@ -177,7 +193,8 @@ def publish_listing(listing):
         "🌙 <b>زرین ماه | طلای کم‌اجرت</b>\n\n"
         f"🏷 <b>{label}</b>\n"
         f"💎 <b>{title}</b>\n\n"
-        f"📋 {description}\n\n"
+        f"📋 {description}\n"
+        f"⚖️ <b>وزن طلا:</b> {weight} گرم\n\n"
         f"💰 <b>قیمت اعلامی:</b> {price}\n"
         f"📞 <b>راه ارتباطی:</b> {contact}\n\n"
         "#محصولات_برای_فروش"
@@ -206,6 +223,7 @@ def finish_listing(state, user_id, chat_id):
         "kind": draft["kind"],
         "title": draft["title"],
         "description": draft["description"],
+        "weight": draft["weight"],
         "price": draft["price"],
         "contact": draft["contact"],
         "photo": draft.get("photo"),
@@ -219,51 +237,51 @@ def finish_listing(state, user_id, chat_id):
     state["next_id"] += 1
     state["listings"].append(listing)
 
-    if listing["kind"] == "admin":
-        # وضعیت باید قبل از انتشار ذخیره شود.
-        # ذخیره نهایی state در do_POST انجام می‌شود؛
-        # بنابراین انتشار مستقیم مدیر در این مسیر
-        # عمداً پیش از ذخیره انجام نمی‌شود.
-        send_message(
-            chat_id,
-            "⚠️ برای جلوگیری از انتشار تکراری، "
-            "ثبت محصول مدیر نیازمند ذخیره وضعیت "
-            "پیش از انتشار است. فعلاً این محصول "
-            "ثبت شده اما منتشر نشده است.",
-        )
-    else:
-        admin_text = (
-            "🔔 <b>آگهی جدید برای بررسی</b>\n\n"
-            f"🆔 شماره آگهی: {listing['id']}\n"
-            f"💎 {html.escape(listing['title'])}\n"
-            f"📋 {html.escape(listing['description'])}\n"
-            f"💰 قیمت: {html.escape(listing['price'])}\n"
-            f"📞 ارتباط: {html.escape(listing['contact'])}\n\n"
-            "برای انتشار، آگهی را تأیید کن."
-        )
-
-        keyboard = {
-            "inline_keyboard": [[
-                {
-                    "text": "✅ تأیید و انتشار",
-                    "callback_data": f"approve:{listing['id']}",
-                },
-                {
-                    "text": "❌ رد آگهی",
-                    "callback_data": f"reject:{listing['id']}",
-                },
-            ]]
-        }
-
-        send_message(ADMIN_ID, admin_text, keyboard)
-
-        send_message(
-            chat_id,
-            "✅ آگهی دریافت شد و برای بررسی مدیر ارسال شد.\n"
-            "پس از تأیید، در کانال منتشر می‌شود.",
-        )
-
     cancel_flow(user)
+
+    if listing["kind"] == "admin":
+        send_message(
+            chat_id,
+            "✅ اطلاعات محصول مدیر ثبت شد.\n"
+            "پس از ذخیره وضعیت، انتشار در کانال انجام می‌شود.",
+            main_keyboard(True),
+        )
+        return listing["id"]
+
+    admin_text = (
+        "🔔 <b>آگهی جدید برای بررسی</b>\n\n"
+        f"🆔 شماره آگهی: {listing['id']}\n"
+        f"💎 {html.escape(listing['title'])}\n"
+        f"⚖️ وزن: {html.escape(listing['weight'])} گرم\n"
+        f"📋 {html.escape(listing['description'])}\n"
+        f"💰 قیمت: {html.escape(listing['price'])}\n"
+        f"📞 ارتباط: {html.escape(listing['contact'])}\n\n"
+        "برای انتشار، آگهی را تأیید کن."
+    )
+
+    keyboard = {
+        "inline_keyboard": [[
+            {
+                "text": "✅ تأیید و انتشار",
+                "callback_data": f"approve:{listing['id']}",
+            },
+            {
+                "text": "❌ رد آگهی",
+                "callback_data": f"reject:{listing['id']}",
+            },
+        ]]
+    }
+
+    send_message(ADMIN_ID, admin_text, keyboard)
+
+    send_message(
+        chat_id,
+        "✅ آگهی دریافت شد و برای بررسی مدیر ارسال شد.\n"
+        "پس از تأیید، در کانال منتشر می‌شود.",
+        main_keyboard(user_id == ADMIN_ID),
+    )
+
+    return None
 
 
 def handle_message(state, message):
@@ -281,7 +299,7 @@ def handle_message(state, message):
             "عملیات لغو شد.",
             main_keyboard(is_admin),
         )
-        return
+        return None
 
     if text == "/start":
         cancel_flow(user)
@@ -292,31 +310,31 @@ def handle_message(state, message):
             "آگهی کاربران پس از تأیید مدیر منتشر می‌شود.",
             main_keyboard(is_admin),
         )
-        return
+        return None
 
     if text == "راهنمای ثبت آگهی":
         send_message(
             chat_id,
-            "برای ثبت آگهی، عنوان، توضیحات، قیمت و راه "
-            "ارتباطی را بفرست.\n"
+            "برای ثبت آگهی، عنوان، توضیحات، وزن طلا، "
+            "قیمت و راه ارتباطی را بفرست.\n"
             "در پایان می‌توانی عکس محصول را هم ارسال کنی.\n"
             "آگهی کاربران قبل از انتشار بررسی می‌شود.\n\n"
             "برای لغو هر زمان /cancel را بفرست.",
         )
-        return
+        return None
 
     if text == "ثبت آگهی فروش":
         start_listing(chat_id, user, "user")
-        return
+        return None
 
     if text == "ثبت محصول مدیر" and is_admin:
         start_listing(chat_id, user, "admin")
-        return
+        return None
 
     if text == "آگهی‌های در انتظار" and is_admin:
         pending = [
             item for item in state["listings"]
-            if item["status"] == "pending"
+            if item.get("status") == "pending"
         ]
 
         if not pending:
@@ -324,7 +342,7 @@ def handle_message(state, message):
                 chat_id,
                 "در حال حاضر آگهی در انتظاری وجود ندارد.",
             )
-            return
+            return None
 
         for item in pending:
             keyboard = {
@@ -344,10 +362,12 @@ def handle_message(state, message):
                 chat_id,
                 f"آگهی شماره {item['id']}\n"
                 f"عنوان: {html.escape(item['title'])}\n"
+                f"وزن: {html.escape(str(item.get('weight', 'ثبت نشده')))} گرم\n"
                 f"قیمت: {html.escape(item['price'])}",
                 keyboard,
             )
-        return
+
+        return None
 
     flow = user.get("flow")
 
@@ -357,17 +377,14 @@ def handle_message(state, message):
             "برای شروع از دکمه‌های منو استفاده کن.",
             main_keyboard(is_admin),
         )
-        return
+        return None
 
     draft = user["draft"]
 
     if flow == "title":
         if not text:
-            send_message(
-                chat_id,
-                "لطفاً عنوان محصول را به صورت متن بفرست.",
-            )
-            return
+            send_message(chat_id, "لطفاً عنوان محصول را بفرست.")
+            return None
 
         draft["title"] = text[:150]
         user["flow"] = "description"
@@ -375,27 +392,57 @@ def handle_message(state, message):
 
     elif flow == "description":
         if not text:
-            send_message(
-                chat_id,
-                "لطفاً توضیحات را به صورت متن بفرست.",
-            )
-            return
+            send_message(chat_id, "لطفاً توضیحات را بفرست.")
+            return None
 
         draft["description"] = text[:700]
+        user["flow"] = "weight"
+        send_message(
+            chat_id,
+            "⚖️ وزن طلا را به گرم وارد کن.\n"
+            "مثال: 2.500\n"
+            "می‌توانی از اعداد فارسی یا انگلیسی استفاده کنی.",
+        )
+
+    elif flow == "weight":
+        normalized = text.translate(
+            str.maketrans(
+                "۰۱۲۳۴۵۶۷۸۹٠١٢٣٤٥٦٧٨٩٫٬",
+                "01234567890123456789..",
+            )
+        ).replace(",", ".").strip()
+
+        if not re.fullmatch(r"\d+(?:\.\d{1,4})?", normalized):
+            send_message(
+                chat_id,
+                "وزن معتبر نیست. فقط عدد مثبت بر حسب گرم وارد کن.\n"
+                "مثال: 2.500",
+            )
+            return None
+
+        try:
+            weight_value = float(normalized)
+        except ValueError:
+            weight_value = 0
+
+        if weight_value <= 0 or weight_value > 100000:
+            send_message(
+                chat_id,
+                "وزن باید بیشتر از صفر و در محدوده معتبر باشد.",
+            )
+            return None
+
+        draft["weight"] = f"{weight_value:.4f}".rstrip("0").rstrip(".")
         user["flow"] = "price"
-        send_message(chat_id, "قیمت پیشنهادی را بفرست.")
+        send_message(chat_id, "💰 قیمت پیشنهادی را بفرست.")
 
     elif flow == "price":
         if not text:
-            send_message(
-                chat_id,
-                "لطفاً قیمت را به صورت متن بفرست.",
-            )
-            return
+            send_message(chat_id, "لطفاً قیمت را بفرست.")
+            return None
 
         draft["price"] = text[:100]
         user["flow"] = "contact"
-
         send_message(
             chat_id,
             "راه ارتباطی فروشنده را بفرست؛ "
@@ -404,15 +451,11 @@ def handle_message(state, message):
 
     elif flow == "contact":
         if not text:
-            send_message(
-                chat_id,
-                "لطفاً راه ارتباطی را به صورت متن بفرست.",
-            )
-            return
+            send_message(chat_id, "لطفاً راه ارتباطی را بفرست.")
+            return None
 
         draft["contact"] = text[:150]
         user["flow"] = "photo"
-
         send_message(
             chat_id,
             "حالا عکس محصول را بفرست.\n"
@@ -429,9 +472,11 @@ def handle_message(state, message):
                 chat_id,
                 "لطفاً عکس محصول را بفرست یا بنویس «بدون عکس».",
             )
-            return
+            return None
 
-        finish_listing(state, user_id, chat_id)
+        return finish_listing(state, user_id, chat_id)
+
+    return None
 
 
 def handle_callback(state, callback, sha, update_id):
@@ -451,49 +496,39 @@ def handle_callback(state, callback, sha, update_id):
         action, listing_id = data.split(":", 1)
         listing_id = int(listing_id)
     except (ValueError, TypeError):
+        telegram("answerCallbackQuery", {
+            "callback_query_id": callback_id,
+            "text": "درخواست نامعتبر است.",
+            "show_alert": True,
+        })
         return sha
 
     listing = next(
         (
             item for item in state["listings"]
-            if item["id"] == listing_id
+            if int(item.get("id", -1)) == listing_id
         ),
         None,
     )
 
-    if not listing or listing["status"] != "pending":
+    if not listing or listing.get("status") != "pending":
         telegram("answerCallbackQuery", {
             "callback_query_id": callback_id,
-            "text": (
-                "این آگهی قبلاً بررسی شده، "
-                "در حال انتشار است یا پیدا نشد."
-            ),
+            "text": "این آگهی قبلاً بررسی شده یا پیدا نشد.",
             "show_alert": True,
         })
         return sha
 
     if action == "approve":
-        # ابتدا وضعیت publishing و شناسه آپدیت ذخیره می‌شود.
-        # اگر ذخیره شکست بخورد، انتشار انجام نخواهد شد.
+        # سازگاری با آگهی‌های قدیمی که وزن ندارند.
+        listing.setdefault("weight", "ثبت نشده")
         listing["status"] = "publishing"
         state["last_update_id"] = update_id
+
+        # انتشار فقط بعد از ذخیره موفق شروع می‌شود.
         sha = save_state(state, sha)
 
-        try:
-            publish_listing(listing)
-        except Exception:
-            # نتیجه انتشار ممکن است مبهم باشد.
-            # وضعیت publishing حفظ می‌شود تا آگهی
-            # خودکار و ناخواسته دوباره منتشر نشود.
-            telegram("answerCallbackQuery", {
-                "callback_query_id": callback_id,
-                "text": (
-                    "نتیجه انتشار مشخص نیست. "
-                    "کانال را بررسی کن و دوباره کلیک نکن."
-                ),
-                "show_alert": True,
-            })
-            raise
+        publish_listing(listing)
 
         listing["status"] = "published"
         sha = save_state(state, sha)
@@ -518,9 +553,16 @@ def handle_callback(state, callback, sha, update_id):
 
         send_message(
             listing["owner_id"],
-            "متأسفانه آگهی شما تأیید نشد. برای اصلاح و ارسال "
-            "دوباره، از منوی ربات یک آگهی جدید ثبت کن.",
+            "متأسفانه آگهی شما تأیید نشد. برای ارسال دوباره، "
+            "از منوی ربات یک آگهی جدید ثبت کن.",
         )
+
+    else:
+        telegram("answerCallbackQuery", {
+            "callback_query_id": callback_id,
+            "text": "عملیات ناشناخته است.",
+            "show_alert": True,
+        })
 
     return sha
 
@@ -528,9 +570,10 @@ def handle_callback(state, callback, sha, update_id):
 class handler(BaseHTTPRequestHandler):
 
     def respond(self, status, message):
-        body = json.dumps(
-            {"ok": status == 200, "message": message}
-        ).encode("utf-8")
+        body = json.dumps({
+            "ok": status == 200,
+            "message": message,
+        }).encode("utf-8")
 
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
@@ -572,32 +615,63 @@ class handler(BaseHTTPRequestHandler):
                 self.respond(200, "Duplicate update ignored")
                 return
 
+            admin_listing_id = None
+
             if "callback_query" in update:
                 callback = update["callback_query"]
                 action_data = callback.get("data", "")
 
                 if action_data.startswith("approve:"):
-                    sha = handle_callback(
+                    handle_callback(
                         state, callback, sha, update_id
                     )
-                    # handle_callback در مسیر approve،
-                    # state را ذخیره کرده است.
                     self.respond(200, "OK")
                     return
 
-                handle_callback(state, callback, sha, update_id)
+                handle_callback(
+                    state, callback, sha, update_id
+                )
 
             elif "message" in update:
-                handle_message(state, update["message"])
+                admin_listing_id = handle_message(
+                    state, update["message"]
+                )
 
+            # ابتدا وضعیت ثبت اولیه و شناسه آپدیت ذخیره می‌شود.
             state["last_update_id"] = update_id
-            save_state(state, sha)
+            sha = save_state(state, sha)
+
+            if admin_listing_id is not None:
+                listing = next(
+                    (
+                        item for item in state["listings"]
+                        if int(item.get("id", -1)) == admin_listing_id
+                    ),
+                    None,
+                )
+
+                if listing and listing.get("status") == "publishing":
+                    # اگر درخواست انتشار خطا بدهد، وضعیت publishing
+                    # برای بررسی دستی باقی می‌ماند.
+                    publish_listing(listing)
+
+                    listing["status"] = "published"
+                    sha = save_state(state, sha)
+
+                    send_message(
+                        ADMIN_ID,
+                        "✅ محصول مدیر با موفقیت در کانال "
+                        "زرین ماه منتشر شد.",
+                        main_keyboard(True),
+                    )
 
             self.respond(200, "OK")
 
         except Exception:
-            # از نمایش توکن‌ها و اطلاعات محرمانه در لاگ جلوگیری می‌شود.
             try:
                 self.respond(500, "Temporary processing error")
             except Exception:
                 pass
+
+    def log_message(self, format, *args):
+        return
