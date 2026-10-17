@@ -62,7 +62,37 @@ def send_message(chat_id, text, keyboard=None, message_thread_id=None):
     if message_thread_id is not None:
         data["message_thread_id"] = message_thread_id
 
-    telegram("sendMessage", data)
+    return telegram("sendMessage", data)
+
+
+def send_registration_button_to_group():
+    """ارسال و سنجاق پیام دکمه‌دار ثبت آگهی در موضوع خریدوفروش."""
+    keyboard = {
+        "inline_keyboard": [[
+            {
+                "text": "🟡 ثبت آگهی با ربات",
+                "url": "https://t.me/ZarinMahGoldBot?start=sell",
+            }
+        ]]
+    }
+
+    message = send_message(
+        GROUP,
+        "🌙 <b>زرین ماه | طلای کم‌اجرت</b>\n\n"
+        "💍 <b>قصد فروش طلا داری؟</b>\n\n"
+        "برای ثبت رایگان آگهی، دکمه زیر را بزن.\n"
+        "آگهی پس از بررسی و تأیید مدیر در موضوع خریدوفروش منتشر می‌شود.",
+        keyboard=keyboard,
+        message_thread_id=GROUP_THREAD_ID,
+    )
+
+    telegram("pinChatMessage", {
+        "chat_id": GROUP,
+        "message_id": message["message_id"],
+        "disable_notification": True,
+    })
+
+    return message
 
 
 def send_listing_to_destination(chat_id, caption, photo=None, thread_id=None):
@@ -94,6 +124,7 @@ def main_keyboard(is_admin=False):
     if is_admin:
         rows.insert(1, [{"text": "ثبت محصول مدیر"}])
         rows.insert(2, [{"text": "آگهی‌های در انتظار"}])
+        rows.insert(3, [{"text": "📌 ارسال دکمه ثبت آگهی به گروه"}])
 
     return {
         "keyboard": rows,
@@ -378,6 +409,24 @@ def handle_message(state, message):
 
     if text == "ثبت محصول مدیر" and is_admin:
         start_listing(chat_id, user, "admin")
+        return None
+
+    if text == "📌 ارسال دکمه ثبت آگهی به گروه" and is_admin:
+        try:
+            send_registration_button_to_group()
+            send_message(
+                chat_id,
+                "✅ پیام دکمه‌دار ثبت آگهی در موضوع خریدوفروش ارسال و سنجاق شد.\n\n"
+                "اگر ارسال یا سنجاق انجام نشد، بررسی کن ربات در گروه مجوز ارسال پیام و سنجاق‌کردن پیام را داشته باشد و موضوع برای ارسال پیام توسط ربات بسته نباشد.",
+                main_keyboard(True),
+            )
+        except Exception:
+            send_message(
+                chat_id,
+                "❌ ارسال یا سنجاق پیام انجام نشد.\n\n"
+                "لطفاً بررسی کن ربات مدیر گروه باشد و مجوز ارسال پیام و سنجاق‌کردن پیام را داشته باشد. اگر موضوع خریدوفروش بسته است، موقتاً آن را باز کن، دوباره تلاش کن و سپس ببند.",
+                main_keyboard(True),
+            )
         return None
 
     if text == "آگهی‌های در انتظار" and is_admin:
