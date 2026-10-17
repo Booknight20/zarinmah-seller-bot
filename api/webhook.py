@@ -16,6 +16,8 @@ WEBHOOK_SECRET = os.environ["TELEGRAM_WEBHOOK_SECRET"]
 
 DATA_REPO = "Booknight20/zarinmah-seller-data"
 CHANNEL = "@ZarinMahGold"
+GROUP = os.getenv("TELEGRAM_GROUP", "@ZarinMahCommunity").strip()
+GROUP_THREAD_ID = int(os.getenv("TELEGRAM_GROUP_THREAD_ID", "17"))
 ADMIN_ID = 8816884849
 
 TG_API = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
@@ -47,7 +49,7 @@ def telegram(method, data=None):
     return result.get("result")
 
 
-def send_message(chat_id, text, keyboard=None):
+def send_message(chat_id, text, keyboard=None, message_thread_id=None):
     data = {
         "chat_id": chat_id,
         "text": text,
@@ -57,7 +59,30 @@ def send_message(chat_id, text, keyboard=None):
     if keyboard:
         data["reply_markup"] = keyboard
 
+    if message_thread_id is not None:
+        data["message_thread_id"] = message_thread_id
+
     telegram("sendMessage", data)
+
+
+def send_listing_to_destination(chat_id, caption, photo=None, thread_id=None):
+    """ارسال آگهی به مقصد؛ در صورت نیاز داخل موضوع مشخص گروه."""
+    if photo:
+        data = {
+            "chat_id": chat_id,
+            "photo": photo,
+            "caption": caption[:1000],
+            "parse_mode": "HTML",
+        }
+        if thread_id is not None:
+            data["message_thread_id"] = thread_id
+        telegram("sendPhoto", data)
+    else:
+        send_message(
+            chat_id,
+            caption,
+            message_thread_id=thread_id,
+        )
 
 
 def main_keyboard(is_admin=False):
@@ -206,15 +231,17 @@ def publish_listing(listing):
 
     photo = listing.get("photo")
 
-    if photo:
-        telegram("sendPhoto", {
-            "chat_id": CHANNEL,
-            "photo": photo,
-            "caption": caption[:1000],
-            "parse_mode": "HTML",
-        })
-    else:
-        send_message(CHANNEL, caption)
+    # آگهی کاربران فقط در موضوع خریدوفروش گروه منتشر می‌شود.
+    # محصولات مدیر در کانال و همچنین در موضوع خریدوفروش گروه منتشر می‌شوند.
+    if listing.get("kind") == "admin":
+        send_listing_to_destination(CHANNEL, caption, photo=photo)
+
+    send_listing_to_destination(
+        GROUP,
+        caption,
+        photo=photo,
+        thread_id=GROUP_THREAD_ID,
+    )
 
 
 def finish_listing(state, user_id, chat_id):
@@ -247,7 +274,7 @@ def finish_listing(state, user_id, chat_id):
         send_message(
             chat_id,
             "✅ اطلاعات محصول مدیر ثبت شد.\n"
-            "پس از ذخیره وضعیت، انتشار در کانال انجام می‌شود.",
+            "پس از ذخیره وضعیت، محصول در کانال و موضوع خریدوفروش گروه منتشر می‌شود.",
             main_keyboard(True),
         )
         return listing["id"]
@@ -281,7 +308,7 @@ def finish_listing(state, user_id, chat_id):
     send_message(
         chat_id,
         "✅ آگهی دریافت شد و برای بررسی مدیر ارسال شد.\n"
-        "پس از تأیید، در کانال منتشر می‌شود.",
+        "پس از تأیید مدیر، در موضوع خریدوفروش گروه منتشر می‌شود.",
         main_keyboard(user_id == ADMIN_ID),
     )
 
@@ -562,7 +589,7 @@ def handle_callback(state, callback, sha, update_id):
 
         send_message(
             listing["owner_id"],
-            "✅ آگهی شما پس از بررسی تأیید و منتشر شد.",
+            "✅ آگهی شما پس از بررسی در موضوع خریدوفروش گروه منتشر شد.",
         )
 
     elif action == "reject":
@@ -678,8 +705,8 @@ class handler(BaseHTTPRequestHandler):
 
                     send_message(
                         ADMIN_ID,
-                        "✅ محصول مدیر با موفقیت در کانال "
-                        "زرین ماه منتشر شد.",
+                        "✅ محصول مدیر در کانال زرین ماه و موضوع "
+                        "خریدوفروش گروه منتشر شد.",
                         main_keyboard(True),
                     )
 
