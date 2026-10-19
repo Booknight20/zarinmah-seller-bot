@@ -1,3 +1,4 @@
+
 import os
 import json
 import base64
@@ -404,3 +405,366 @@ def handle_message(state, message):
     if text == "ثبت آگهی فروش":
         start_listing(chat_id, user, "user")
         return None
+
+    if text == "ثبت محصول مدیر" and is_admin:
+        start_listing(chat_id, user, "admin")
+        return None
+
+    if text == "📌 ارسال دکمه ثبت آگهی به گروه" and is_admin:
+        try:
+            send_registration_button_to_group()
+            send_message(
+                chat_id,
+                "✅ پیام دکمه‌دار ثبت آگهی در موضوع خریدوفروش ارسال و سنجاق شد.\n\n"
+                "اگر ارسال یا سنجاق انجام نشد، بررسی کن ربات در گروه مجوز ارسال پیام و سنجاق‌کردن پیام را داشته باشد و موضوع برای ارسال پیام توسط ربات بسته نباشد.",
+                main_keyboard(True),
+            )
+        except Exception:
+            send_message(
+                chat_id,
+                "❌ ارسال یا سنجاق پیام انجام نشد.\n\n"
+                "لطفاً بررسی کن ربات مدیر گروه باشد و مجوز ارسال پیام و سنجاق‌کردن پیام را داشته باشد. اگر موضوع خریدوفروش بسته است، موقتاً آن را باز کن، دوباره تلاش کن و سپس ببند.",
+                main_keyboard(True),
+            )
+        return None
+
+    if text == "آگهی‌های در انتظار" and is_admin:
+        pending = [
+            item for item in state["listings"]
+            if item.get("status") == "pending"
+        ]
+
+        if not pending:
+            send_message(
+                chat_id,
+                "در حال حاضر آگهی در انتظاری وجود ندارد.",
+            )
+            return None
+
+        for item in pending:
+            keyboard = {
+                "inline_keyboard": [[
+                    {
+                        "text": "✅ تأیید و انتشار",
+                        "callback_data": f"approve:{item['id']}",
+                    },
+                    {
+                        "text": "❌ رد آگهی",
+                        "callback_data": f"reject:{item['id']}",
+                    },
+                ]]
+            }
+
+            send_message(
+                chat_id,
+                f"آگهی شماره {item['id']}\n"
+                f"عنوان: {html.escape(item['title'])}\n"
+                f"وزن: {html.escape(str(item.get('weight', 'ثبت نشده')))} گرم\n"
+                f"قیمت: {html.escape(item['price'])}",
+                keyboard,
+            )
+
+        return None
+
+    flow = user.get("flow")
+
+    if not flow:
+        send_message(
+            chat_id,
+            "برای شروع از دکمه‌های منو استفاده کن.",
+            main_keyboard(is_admin),
+        )
+        return None
+
+    draft = user["draft"]
+
+    if flow == "title":
+        if not text:
+            send_message(chat_id, "لطفاً عنوان محصول را بفرست.")
+            return None
+
+        draft["title"] = text[:150]
+        user["flow"] = "description"
+        send_message(chat_id, "توضیحات محصول را بفرست.")
+
+    elif flow == "description":
+        if not text:
+            send_message(chat_id, "لطفاً توضیحات را بفرست.")
+            return None
+
+        draft["description"] = text[:700]
+        user["flow"] = "weight"
+        send_message(
+            chat_id,
+            "⚖️ وزن طلا را به گرم وارد کن.\n"
+            "مثال: 2.500\n"
+            "می‌توانی از اعداد فارسی یا انگلیسی استفاده کنی.",
+        )
+
+    elif flow == "weight":
+        normalized = text.translate(
+            str.maketrans(
+                "۰۱۲۳۴۵۶۷۸۹٠١٢٣٤٥٦٧٨٩٫٬",
+                "01234567890123456789..",
+            )
+        ).replace(",", ".").strip()
+
+        if not re.fullmatch(r"\d+(?:\.\d{1,4})?", normalized):
+            send_message(
+                chat_id,
+                "وزن معتبر نیست. فقط عدد مثبت بر حسب گرم وارد کن.\n"
+                "مثال: 2.500",
+            )
+            return None
+
+        try:
+            weight_value = float(normalized)
+        except ValueError:
+            weight_value = 0
+
+        if weight_value <= 0 or weight_value > 100000:
+            send_message(
+                chat_id,
+                "وزن باید بیشتر از صفر و در محدوده معتبر باشد.",
+            )
+            return None
+
+        draft["weight"] = (
+            f"{weight_value:.4f}".rstrip("0").rstrip(".")
+        )
+        user["flow"] = "price"
+        send_message(chat_id, "💰 قیمت پیشنهادی را بفرست.")
+
+    elif flow == "price":
+        if not text:
+            send_message(chat_id, "لطفاً قیمت را بفرست.")
+            return None
+
+        draft["price"] = text[:100]
+        user["flow"] = "contact"
+        send_message(
+            chat_id,
+            "راه ارتباطی فروشنده را بفرست؛ "
+            "مثلاً آیدی تلگرام یا شماره تماس.",
+        )
+
+    elif flow == "contact":
+        if not text:
+            send_message(chat_id, "لطفاً راه ارتباطی را بفرست.")
+            return None
+
+        draft["contact"] = text[:150]
+        user["flow"] = "photo"
+        send_message(
+            chat_id,
+            "حالا عکس محصول را بفرست.\n"
+            "اگر عکس نداری، عبارت «بدون عکس» را بفرست.",
+        )
+
+    elif flow == "photo":
+        photos = message.get("photo")
+
+        if photos:
+            draft["photo"] = photos[-1]["file_id"]
+        elif text.lower() not in ("بدون عکس", "ندارم", "no"):
+            send_message(
+                chat_id,
+                "لطفاً عکس محصول را بفرست یا بنویس «بدون عکس».",
+            )
+            return None
+
+        return finish_listing(state, user_id, chat_id)
+
+    return None
+
+
+def handle_callback(state, callback, sha, update_id):
+    user_id = callback["from"]["id"]
+    callback_id = callback["id"]
+    data = callback.get("data", "")
+
+    if user_id != ADMIN_ID:
+        telegram("answerCallbackQuery", {
+            "callback_query_id": callback_id,
+            "text": "این عملیات فقط برای مدیر مجاز است.",
+            "show_alert": True,
+        })
+        return sha
+
+    try:
+        action, listing_id = data.split(":", 1)
+        listing_id = int(listing_id)
+    except (ValueError, TypeError):
+        telegram("answerCallbackQuery", {
+            "callback_query_id": callback_id,
+            "text": "درخواست نامعتبر است.",
+            "show_alert": True,
+        })
+        return sha
+
+    listing = next(
+        (
+            item for item in state["listings"]
+            if int(item.get("id", -1)) == listing_id
+        ),
+        None,
+    )
+
+    if not listing or listing.get("status") != "pending":
+        telegram("answerCallbackQuery", {
+            "callback_query_id": callback_id,
+            "text": "این آگهی قبلاً بررسی شده یا پیدا نشد.",
+            "show_alert": True,
+        })
+        return sha
+
+    if action == "approve":
+        listing.setdefault("weight", "ثبت نشده")
+        listing["status"] = "publishing"
+        state["last_update_id"] = update_id
+
+        sha = save_state(state, sha)
+
+        publish_listing(listing)
+
+        listing["status"] = "published"
+        sha = save_state(state, sha)
+
+        telegram("answerCallbackQuery", {
+            "callback_query_id": callback_id,
+            "text": "آگهی منتشر شد.",
+        })
+
+        send_message(
+            listing["owner_id"],
+            "✅ آگهی شما پس از بررسی در موضوع خریدوفروش گروه منتشر شد.",
+        )
+
+    elif action == "reject":
+        listing["status"] = "rejected"
+
+        telegram("answerCallbackQuery", {
+            "callback_query_id": callback_id,
+            "text": "آگهی رد شد.",
+        })
+
+        send_message(
+            listing["owner_id"],
+            "متأسفانه آگهی شما تأیید نشد. برای ارسال دوباره، "
+            "از منوی ربات یک آگهی جدید ثبت کن.",
+        )
+
+    else:
+        telegram("answerCallbackQuery", {
+            "callback_query_id": callback_id,
+            "text": "عملیات ناشناخته است.",
+            "show_alert": True,
+        })
+
+    return sha
+
+
+class handler(BaseHTTPRequestHandler):
+
+    def respond(self, status, message):
+        body = json.dumps({
+            "ok": status == 200,
+            "message": message,
+        }).encode("utf-8")
+
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_GET(self):
+        self.respond(200, "Seller webhook endpoint is running.")
+
+    def do_POST(self):
+        received_secret = self.headers.get(
+            "X-Telegram-Bot-Api-Secret-Token", ""
+        )
+
+        if not hmac.compare_digest(
+            received_secret, WEBHOOK_SECRET
+        ):
+            self.respond(403, "Forbidden")
+            return
+
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+
+            if length <= 0 or length > 1_000_000:
+                self.respond(400, "Invalid request size")
+                return
+
+            update = json.loads(self.rfile.read(length))
+
+            if "update_id" not in update:
+                self.respond(400, "Missing update ID")
+                return
+
+            state, sha = load_state()
+            update_id = int(update["update_id"])
+
+            if update_id <= state.get("last_update_id", -1):
+                self.respond(200, "Duplicate update ignored")
+                return
+
+            admin_listing_id = None
+
+            if "callback_query" in update:
+                callback = update["callback_query"]
+
+                sha = handle_callback(
+                    state, callback, sha, update_id
+                )
+
+                # وضعیت نهایی آپدیت ذخیره می‌شود.
+                state["last_update_id"] = update_id
+                sha = save_state(state, sha)
+
+                self.respond(200, "OK")
+                return
+
+            elif "message" in update:
+                admin_listing_id = handle_message(
+                    state, update["message"]
+                )
+
+            state["last_update_id"] = update_id
+            sha = save_state(state, sha)
+
+            if admin_listing_id is not None:
+                listing = next(
+                    (
+                        item for item in state["listings"]
+                        if int(item.get("id", -1)) == admin_listing_id
+                    ),
+                    None,
+                )
+
+                if listing and listing.get("status") == "publishing":
+                    publish_listing(listing)
+
+                    listing["status"] = "published"
+                    sha = save_state(state, sha)
+
+                    send_message(
+                        ADMIN_ID,
+                        "✅ محصول مدیر در کانال زرین ماه و موضوع "
+                        "خریدوفروش گروه منتشر شد.",
+                        main_keyboard(True),
+                    )
+
+            self.respond(200, "OK")
+
+        except Exception:
+            try:
+                self.respond(500, "Temporary processing error")
+            except Exception:
+                pass
+
+    def log_message(self, format, *args):
+        return
