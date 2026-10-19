@@ -95,7 +95,7 @@ def send_registration_button_to_group():
 
 
 def send_listing_to_destination(chat_id, caption, photo=None, thread_id=None):
-    """ارسال آگهی به مقصد؛ در صورت نیاز داخل موضوع مشخص گروه."""
+    """ارسال آگهی و برگرداندن شناسه پیام برای ویرایش بعدی."""
     if photo:
         data = {
             "chat_id": chat_id,
@@ -105,13 +105,19 @@ def send_listing_to_destination(chat_id, caption, photo=None, thread_id=None):
         }
         if thread_id is not None:
             data["message_thread_id"] = thread_id
-        telegram("sendPhoto", data)
+        message = telegram("sendPhoto", data)
     else:
-        send_message(
+        message = send_message(
             chat_id,
             caption,
             message_thread_id=thread_id,
         )
+
+    return {
+        "chat_id": message["chat"]["id"],
+        "message_id": message["message_id"],
+        "has_photo": bool(photo),
+    }
 
 
 def main_keyboard(is_admin=False):
@@ -129,6 +135,20 @@ def main_keyboard(is_admin=False):
         "keyboard": rows,
         "resize_keyboard": True,
     }
+
+
+def public_listing_id(listing):
+    """شناسه عمومی و ثابت آگهی؛ شناسه داخلی عددی برای callbackها حفظ می‌شود."""
+    existing = str(listing.get("public_id", "")).strip()
+    if existing:
+        return existing
+
+    try:
+        numeric_id = int(listing.get("id", 0))
+    except (TypeError, ValueError):
+        numeric_id = 0
+
+    return f"ZM-{numeric_id + 1000:04d}"
 
 
 def load_state():
@@ -159,6 +179,10 @@ def load_state():
     state.setdefault("users", {})
     state.setdefault("listings", [])
     state.setdefault("next_id", 1)
+
+    # آگهی‌های قدیمی نیز شناسه عمومی ثابت می‌گیرند؛ شناسه داخلی آنها تغییر نمی‌کند.
+    for listing in state["listings"]:
+        listing.setdefault("public_id", public_listing_id(listing))
 
     existing_ids = [
         int(item.get("id", 0))
@@ -225,7 +249,7 @@ def start_listing(chat_id, user, kind):
     send_message(
         chat_id,
         "📝 ثبت آگهی فروش زرین ماه\n\n"
-        "مرحله ۱ از ۶\n"
+        "مرحله ۱ از ۷\n"
         "عنوان محصول را بفرست.\n"
         "مثال: انگشتر طلای ۱۸ عیار\n\n"
         "برای لغو عملیات، /cancel را بفرست.",
@@ -234,14 +258,11 @@ def start_listing(chat_id, user, kind):
 
 def publish_listing(listing):
     title = html.escape(str(listing.get("title", "")))
-    description = html.escape(
-        str(listing.get("description", ""))
-    )
-    weight = html.escape(
-        str(listing.get("weight", "ثبت نشده"))
-    )
+    description = html.escape(str(listing.get("description", "")))
+    weight = html.escape(str(listing.get("weight", "ثبت نشده")))
     price = html.escape(str(listing.get("price", "")))
     contact = html.escape(str(listing.get("contact", "")))
+    city = html.escape(str(listing.get("city", "ثبت نشده")))
 
     if listing.get("kind") == "admin":
         label = "محصول مدیر زرین ماه"
@@ -251,35 +272,93 @@ def publish_listing(listing):
     caption = (
         "🌙 <b>زرین ماه | طلای کم‌اجرت</b>\n\n"
         f"🏷 <b>{label}</b>\n"
+        f"🆔 <b>شناسه آگهی:</b> {html.escape(public_listing_id(listing))}\n"
         f"💎 <b>{title}</b>\n\n"
         f"📋 {description}\n"
-        f"⚖️ <b>وزن طلا:</b> {weight} گرم\n\n"
+        f"⚖️ <b>وزن طلا:</b> {weight} گرم\n"
         f"💰 <b>قیمت اعلامی:</b> {price}\n"
+        f"📍 <b>شهر:</b> {city}\n"
         f"📞 <b>راه ارتباطی:</b> {contact}\n\n"
         "#محصولات_برای_فروش"
     )
 
+    if listing.get("status") == "sold":
+        caption += "\n\n✅ <b>فروخته شد</b>"
+
     photo = listing.get("photo")
+    published_messages = []
 
-    # آگهی کاربران فقط در موضوع خریدوفروش گروه منتشر می‌شود.
-    # محصولات مدیر در کانال و همچنین در موضوع خریدوفروش گروه منتشر می‌شوند.
+    # محصولات مدیر در کانال و گروه؛ آگهی کاربران فقط در گروه منتشر می‌شود.
     if listing.get("kind") == "admin":
-        send_listing_to_destination(CHANNEL, caption, photo=photo)
+        published_messages.append(
+            send_listing_to_destination(CHANNEL, caption, photo=photo)
+        )
 
-    send_listing_to_destination(
-        GROUP,
-        caption,
-        photo=photo,
-        thread_id=GROUP_THREAD_ID,
+    published_messages.append(
+        send_listing_to_destination(
+            GROUP,
+            caption,
+            photo=photo,
+            thread_id=GROUP_THREAD_ID,
+        )
     )
+
+    listing["published_messages"] = published_messages
+    return published_messages
+
+
+def mark_listing_sold(listing):
+    """روی پیام‌های منتشرشده برچسب فروش‌رفته درج می‌کند."""
+    for posted in listing.get("published_messages", []):
+        chat_id = posted.get("chat_id")
+        message_id = posted.get("message_id")
+        if not chat_id or not message_id:
+            continue
+
+        if posted.get("has_photo"):
+            method = "editMessageCaption"
+            field = "caption"
+        else:
+            method = "editMessageText"
+            field = "text"
+
+        # متن پایه را از محتوای ثبت‌شده می‌سازیم تا برچسب دوبار اضافه نشود.
+        title = html.escape(str(listing.get("title", "")))
+        description = html.escape(str(listing.get("description", "")))
+        weight = html.escape(str(listing.get("weight", "ثبت نشده")))
+        price = html.escape(str(listing.get("price", "")))
+        contact = html.escape(str(listing.get("contact", "")))
+        city = html.escape(str(listing.get("city", "ثبت نشده")))
+        label = "محصول مدیر زرین ماه" if listing.get("kind") == "admin" else "آگهی فروش کاربر"
+        text = (
+            "🌙 <b>زرین ماه | طلای کم‌اجرت</b>\n\n"
+            f"🏷 <b>{label}</b>\n"
+            f"🆔 <b>شناسه آگهی:</b> {html.escape(public_listing_id(listing))}\n"
+            f"💎 <b>{title}</b>\n\n"
+            f"📋 {description}\n"
+            f"⚖️ <b>وزن طلا:</b> {weight} گرم\n"
+            f"💰 <b>قیمت اعلامی:</b> {price}\n"
+            f"📍 <b>شهر:</b> {city}\n"
+            f"📞 <b>راه ارتباطی:</b> {contact}\n\n"
+            "#محصولات_برای_فروش\n\n"
+            "✅ <b>فروخته شد</b>"
+        )
+        telegram(method, {
+            "chat_id": chat_id,
+            "message_id": message_id,
+            field: text[:1000] if posted.get("has_photo") else text,
+            "parse_mode": "HTML",
+        })
 
 
 def finish_listing(state, user_id, chat_id):
     user = get_user(state, user_id)
     draft = user["draft"]
 
+    internal_id = int(state["next_id"])
     listing = {
-        "id": state["next_id"],
+        "id": internal_id,
+        "public_id": f"ZM-{internal_id + 1000:04d}",
         "owner_id": user_id,
         "kind": draft["kind"],
         "title": draft["title"],
@@ -287,6 +366,7 @@ def finish_listing(state, user_id, chat_id):
         "weight": draft["weight"],
         "price": draft["price"],
         "contact": draft["contact"],
+        "city": draft.get("city", "ثبت نشده"),
         "photo": draft.get("photo"),
         "status": (
             "pending"
@@ -304,6 +384,7 @@ def finish_listing(state, user_id, chat_id):
         send_message(
             chat_id,
             "✅ اطلاعات محصول مدیر ثبت شد.\n"
+            f"🆔 شناسه آگهی: {html.escape(public_listing_id(listing))}\n"
             "پس از ذخیره وضعیت، محصول در کانال و موضوع خریدوفروش گروه منتشر می‌شود.",
             main_keyboard(True),
         )
@@ -311,11 +392,12 @@ def finish_listing(state, user_id, chat_id):
 
     admin_text = (
         "🔔 <b>آگهی جدید برای بررسی</b>\n\n"
-        f"🆔 شماره آگهی: {listing['id']}\n"
+        f"🆔 شناسه آگهی: {html.escape(public_listing_id(listing))}\n"
         f"💎 {html.escape(listing['title'])}\n"
         f"⚖️ وزن: {html.escape(listing['weight'])} گرم\n"
         f"📋 {html.escape(listing['description'])}\n"
         f"💰 قیمت: {html.escape(listing['price'])}\n"
+        f"📍 شهر: {html.escape(listing.get('city', 'ثبت نشده'))}\n"
         f"📞 ارتباط: {html.escape(listing['contact'])}\n\n"
         "برای انتشار، آگهی را تأیید کن."
     )
@@ -457,10 +539,11 @@ def handle_message(state, message):
 
             send_message(
                 chat_id,
-                f"آگهی شماره {item['id']}\n"
+                f"شناسه آگهی: {html.escape(public_listing_id(item))}\n"
                 f"عنوان: {html.escape(item['title'])}\n"
                 f"وزن: {html.escape(str(item.get('weight', 'ثبت نشده')))} گرم\n"
-                f"قیمت: {html.escape(item['price'])}",
+                f"قیمت: {html.escape(item['price'])}\n"
+                f"شهر: {html.escape(item.get('city', 'ثبت نشده'))}",
                 keyboard,
             )
 
@@ -554,6 +637,19 @@ def handle_message(state, message):
             return None
 
         draft["contact"] = text[:150]
+        user["flow"] = "city"
+        send_message(
+            chat_id,
+            "📍 شهر محل فروش را بنویس.\n"
+            "مثال: بروجرد، تهران یا اصفهان.",
+        )
+
+    elif flow == "city":
+        if not text:
+            send_message(chat_id, "لطفاً نام شهر را بنویس.")
+            return None
+
+        draft["city"] = text[:80]
         user["flow"] = "photo"
         send_message(
             chat_id,
@@ -603,14 +699,49 @@ def handle_callback(state, callback, sha, update_id):
         return sha
 
     listing = next(
-        (
-            item for item in state["listings"]
-            if int(item.get("id", -1)) == listing_id
-        ),
+        (item for item in state["listings"] if int(item.get("id", -1)) == listing_id),
         None,
     )
 
-    if not listing or listing.get("status") != "pending":
+    if not listing:
+        telegram("answerCallbackQuery", {
+            "callback_query_id": callback_id,
+            "text": "آگهی پیدا نشد.",
+            "show_alert": True,
+        })
+        return sha
+
+    if action == "sold":
+        if listing.get("status") == "sold":
+            telegram("answerCallbackQuery", {
+                "callback_query_id": callback_id,
+                "text": "این آگهی قبلاً فروش‌رفته علامت خورده است.",
+            })
+            return sha
+
+        if listing.get("status") != "published":
+            telegram("answerCallbackQuery", {
+                "callback_query_id": callback_id,
+                "text": "فقط آگهی منتشرشده را می‌توان فروش‌رفته کرد.",
+                "show_alert": True,
+            })
+            return sha
+
+        # اول در مقصدها برچسب می‌زنیم، سپس وضعیت را ذخیره می‌کنیم.
+        mark_listing_sold(listing)
+        listing["status"] = "sold"
+        sha = save_state(state, sha)
+        telegram("answerCallbackQuery", {
+            "callback_query_id": callback_id,
+            "text": "برچسب فروش‌رفته روی آگهی درج شد.",
+        })
+        send_message(
+            ADMIN_ID,
+            f"✅ آگهی {html.escape(public_listing_id(listing))} به‌عنوان فروش‌رفته ثبت شد.",
+        )
+        return sha
+
+    if listing.get("status") != "pending":
         telegram("answerCallbackQuery", {
             "callback_query_id": callback_id,
             "text": "این آگهی قبلاً بررسی شده یا پیدا نشد.",
@@ -620,13 +751,12 @@ def handle_callback(state, callback, sha, update_id):
 
     if action == "approve":
         listing.setdefault("weight", "ثبت نشده")
+        listing.setdefault("city", "ثبت نشده")
         listing["status"] = "publishing"
         state["last_update_id"] = update_id
-
         sha = save_state(state, sha)
 
         publish_listing(listing)
-
         listing["status"] = "published"
         sha = save_state(state, sha)
 
@@ -635,19 +765,33 @@ def handle_callback(state, callback, sha, update_id):
             "text": "آگهی منتشر شد.",
         })
 
+        sold_keyboard = {
+            "inline_keyboard": [[{
+                "text": "✅ فروش رفت",
+                "callback_data": f"sold:{listing['id']}",
+            }]]
+        }
+        send_message(
+            ADMIN_ID,
+            "📣 آگهی منتشر شد.\n"
+            f"🆔 شناسه آگهی: {html.escape(public_listing_id(listing))}\n"
+            f"💎 {html.escape(listing.get('title', ''))}\n"
+            f"📍 شهر: {html.escape(listing.get('city', 'ثبت نشده'))}\n\n"
+            "اگر کالا فروش رفت، دکمه زیر را بزن:",
+            sold_keyboard,
+        )
         send_message(
             listing["owner_id"],
-            "✅ آگهی شما پس از بررسی در موضوع خریدوفروش گروه منتشر شد.",
+            "✅ آگهی شما پس از بررسی در موضوع خریدوفروش گروه منتشر شد.\n"
+            f"🆔 شناسه آگهی: {html.escape(public_listing_id(listing))}",
         )
 
     elif action == "reject":
         listing["status"] = "rejected"
-
         telegram("answerCallbackQuery", {
             "callback_query_id": callback_id,
             "text": "آگهی رد شد.",
         })
-
         send_message(
             listing["owner_id"],
             "متأسفانه آگهی شما تأیید نشد. برای ارسال دوباره، "
@@ -751,12 +895,20 @@ class handler(BaseHTTPRequestHandler):
                     listing["status"] = "published"
                     sha = save_state(state, sha)
 
+                    sold_keyboard = {
+                        "inline_keyboard": [[{
+                            "text": "✅ فروش رفت",
+                            "callback_data": f"sold:{listing['id']}",
+                        }]]
+                    }
                     send_message(
                         ADMIN_ID,
-                        "✅ محصول مدیر در کانال زرین ماه و موضوع "
-                        "خریدوفروش گروه منتشر شد.",
-                        main_keyboard(True),
+                        "✅ محصول مدیر در کانال زرین ماه و موضوع خریدوفروش گروه منتشر شد.\n"
+                        f"🆔 شناسه آگهی: {html.escape(public_listing_id(listing))}\n"
+                        "اگر کالا فروش رفت، دکمه زیر را بزن:",
+                        sold_keyboard,
                     )
+                    send_message(ADMIN_ID, "منوی مدیریت:", main_keyboard(True))
 
             self.respond(200, "OK")
 
