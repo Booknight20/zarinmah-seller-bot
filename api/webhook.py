@@ -66,11 +66,11 @@ def send_message(chat_id, text, keyboard=None, message_thread_id=None):
 
 
 def send_registration_button_to_group():
-    """ارسال و سنجاق پیام دکمه‌دار ثبت آگهی در موضوع خریدوفروش."""
+    """ارسال و سنجاق طرح نهایی ثبت آگهی در موضوع خریدوفروش."""
     keyboard = {
         "inline_keyboard": [[
             {
-                "text": "🟡 ثبت آگهی با ربات",
+                "text": "🟡 ثبت آگهی با ربات 🤖",
                 "url": "https://t.me/ZarinMahGoldBot?start=sell",
             }
         ]]
@@ -78,9 +78,7 @@ def send_registration_button_to_group():
 
     message = send_message(
         GROUP,
-        "🌙 <b>زرین ماه | طلای کم‌اجرت</b>\n\n"
-        "📣 <b>آگهی کن، دیده شو، بفروش! 📣</b>\n\n"
-        "آگهی پس از بررسی و تأیید مدیر در موضوع خریدوفروش منتشر می‌شود.",
+        "📣 <b>آگهی کن، دیده شو، بفروش</b> 📣",
         keyboard=keyboard,
         message_thread_id=GROUP_THREAD_ID,
     )
@@ -137,20 +135,6 @@ def main_keyboard(is_admin=False):
     }
 
 
-def public_listing_id(listing):
-    """شناسه عمومی و ثابت آگهی؛ شناسه داخلی عددی برای callbackها حفظ می‌شود."""
-    existing = str(listing.get("public_id", "")).strip()
-    if existing:
-        return existing
-
-    try:
-        numeric_id = int(listing.get("id", 0))
-    except (TypeError, ValueError):
-        numeric_id = 0
-
-    return f"ZM-{numeric_id + 1000:04d}"
-
-
 def load_state():
     response = session.get(GH_API, timeout=20)
 
@@ -179,10 +163,6 @@ def load_state():
     state.setdefault("users", {})
     state.setdefault("listings", [])
     state.setdefault("next_id", 1)
-
-    # آگهی‌های قدیمی نیز شناسه عمومی ثابت می‌گیرند؛ شناسه داخلی آنها تغییر نمی‌کند.
-    for listing in state["listings"]:
-        listing.setdefault("public_id", public_listing_id(listing))
 
     existing_ids = [
         int(item.get("id", 0))
@@ -272,7 +252,6 @@ def publish_listing(listing):
     caption = (
         "🌙 <b>زرین ماه | طلای کم‌اجرت</b>\n\n"
         f"🏷 <b>{label}</b>\n"
-        f"🆔 <b>شناسه آگهی:</b> {html.escape(public_listing_id(listing))}\n"
         f"💎 <b>{title}</b>\n\n"
         f"📋 {description}\n"
         f"⚖️ <b>وزن طلا:</b> {weight} گرم\n"
@@ -333,7 +312,6 @@ def mark_listing_sold(listing):
         text = (
             "🌙 <b>زرین ماه | طلای کم‌اجرت</b>\n\n"
             f"🏷 <b>{label}</b>\n"
-            f"🆔 <b>شناسه آگهی:</b> {html.escape(public_listing_id(listing))}\n"
             f"💎 <b>{title}</b>\n\n"
             f"📋 {description}\n"
             f"⚖️ <b>وزن طلا:</b> {weight} گرم\n"
@@ -355,10 +333,8 @@ def finish_listing(state, user_id, chat_id):
     user = get_user(state, user_id)
     draft = user["draft"]
 
-    internal_id = int(state["next_id"])
     listing = {
-        "id": internal_id,
-        "public_id": f"ZM-{internal_id + 1000:04d}",
+        "id": state["next_id"],
         "owner_id": user_id,
         "kind": draft["kind"],
         "title": draft["title"],
@@ -384,7 +360,6 @@ def finish_listing(state, user_id, chat_id):
         send_message(
             chat_id,
             "✅ اطلاعات محصول مدیر ثبت شد.\n"
-            f"🆔 شناسه آگهی: {html.escape(public_listing_id(listing))}\n"
             "پس از ذخیره وضعیت، محصول در کانال و موضوع خریدوفروش گروه منتشر می‌شود.",
             main_keyboard(True),
         )
@@ -392,7 +367,7 @@ def finish_listing(state, user_id, chat_id):
 
     admin_text = (
         "🔔 <b>آگهی جدید برای بررسی</b>\n\n"
-        f"🆔 شناسه آگهی: {html.escape(public_listing_id(listing))}\n"
+        f"🆔 شماره آگهی: {listing['id']}\n"
         f"💎 {html.escape(listing['title'])}\n"
         f"⚖️ وزن: {html.escape(listing['weight'])} گرم\n"
         f"📋 {html.escape(listing['description'])}\n"
@@ -539,7 +514,7 @@ def handle_message(state, message):
 
             send_message(
                 chat_id,
-                f"شناسه آگهی: {html.escape(public_listing_id(item))}\n"
+                f"آگهی شماره {item['id']}\n"
                 f"عنوان: {html.escape(item['title'])}\n"
                 f"وزن: {html.escape(str(item.get('weight', 'ثبت نشده')))} گرم\n"
                 f"قیمت: {html.escape(item['price'])}\n"
@@ -735,10 +710,7 @@ def handle_callback(state, callback, sha, update_id):
             "callback_query_id": callback_id,
             "text": "برچسب فروش‌رفته روی آگهی درج شد.",
         })
-        send_message(
-            ADMIN_ID,
-            f"✅ آگهی {html.escape(public_listing_id(listing))} به‌عنوان فروش‌رفته ثبت شد.",
-        )
+        send_message(ADMIN_ID, f"✅ آگهی شماره {listing_id} به‌عنوان فروش‌رفته ثبت شد.")
         return sha
 
     if listing.get("status") != "pending":
@@ -774,7 +746,7 @@ def handle_callback(state, callback, sha, update_id):
         send_message(
             ADMIN_ID,
             "📣 آگهی منتشر شد.\n"
-            f"🆔 شناسه آگهی: {html.escape(public_listing_id(listing))}\n"
+            f"🆔 شماره آگهی: {listing['id']}\n"
             f"💎 {html.escape(listing.get('title', ''))}\n"
             f"📍 شهر: {html.escape(listing.get('city', 'ثبت نشده'))}\n\n"
             "اگر کالا فروش رفت، دکمه زیر را بزن:",
@@ -782,8 +754,7 @@ def handle_callback(state, callback, sha, update_id):
         )
         send_message(
             listing["owner_id"],
-            "✅ آگهی شما پس از بررسی در موضوع خریدوفروش گروه منتشر شد.\n"
-            f"🆔 شناسه آگهی: {html.escape(public_listing_id(listing))}",
+            "✅ آگهی شما پس از بررسی در موضوع خریدوفروش گروه منتشر شد.",
         )
 
     elif action == "reject":
@@ -904,7 +875,7 @@ class handler(BaseHTTPRequestHandler):
                     send_message(
                         ADMIN_ID,
                         "✅ محصول مدیر در کانال زرین ماه و موضوع خریدوفروش گروه منتشر شد.\n"
-                        f"🆔 شناسه آگهی: {html.escape(public_listing_id(listing))}\n"
+                        f"🆔 شماره آگهی: {listing['id']}\n"
                         "اگر کالا فروش رفت، دکمه زیر را بزن:",
                         sold_keyboard,
                     )
