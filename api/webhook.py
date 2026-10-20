@@ -1,4 +1,3 @@
-
 import os
 import json
 import base64
@@ -9,6 +8,10 @@ import requests
 
 from http.server import BaseHTTPRequestHandler
 
+
+# =========================================================
+# تنظیمات
+# =========================================================
 
 TELEGRAM_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
 DATA_TOKEN = os.environ["SELLER_DATA_TOKEN"]
@@ -26,6 +29,18 @@ GH_API = (
     f"{DATA_REPO}/contents/state.json"
 )
 
+session = requests.Session()
+session.headers.update({
+    "Authorization": f"Bearer {DATA_TOKEN}",
+    "Accept": "application/vnd.github+json",
+    "X-GitHub-Api-Version": "2022-11-28",
+})
+
+
+# =========================================================
+# قوانین
+# =========================================================
+
 RULES_TEXT = (
     "📋 <b>قوانین ثبت آگهی زرین ماه</b>\n\n"
     "🔹 اطلاعات طلا، وزن، عیار و قیمت باید دقیق باشد.\n\n"
@@ -37,7 +52,11 @@ RULES_TEXT = (
     "با پذیرش قوانین، می‌توانید ثبت آگهی را آغاز کنید."
 )
 
-# انواع کالا؛ هر آگهی فقط یک نوع کالا دارد.
+
+# =========================================================
+# انواع کالا
+# =========================================================
+
 PRODUCT_TYPES = {
     "ring": "💍 انگشتر",
     "earrings": "✨ گوشواره",
@@ -51,13 +70,25 @@ PRODUCT_TYPES = {
     "other": "📦 سایر موارد",
 }
 
-session = requests.Session()
-session.headers.update({
-    "Authorization": f"Bearer {DATA_TOKEN}",
-    "Accept": "application/vnd.github+json",
-    "X-GitHub-Api-Version": "2022-11-28",
-})
 
+# =========================================================
+# زیرگروه‌های سکه
+# =========================================================
+
+COIN_TYPES = {
+    "emami": "سکه تمام امامی (طرح جدید)",
+    "bahar_azadi": "سکه تمام بهار آزادی (طرح قدیم)",
+    "half": "نیم‌سکه",
+    "quarter": "ربع‌سکه",
+    "gram": "سکه یک‌گرمی بانکی",
+    "parsian": "سکه پارسیان",
+    "other_coin": "سایر سکه‌ها",
+}
+
+
+# =========================================================
+# ارتباط با تلگرام
+# =========================================================
 
 def telegram(method, data=None):
     response = requests.post(
@@ -68,13 +99,19 @@ def telegram(method, data=None):
     response.raise_for_status()
 
     result = response.json()
+
     if not result.get("ok"):
         raise RuntimeError("Telegram API request failed")
 
     return result.get("result")
 
 
-def send_message(chat_id, text, keyboard=None, message_thread_id=None):
+def send_message(
+    chat_id,
+    text,
+    keyboard=None,
+    message_thread_id=None,
+):
     data = {
         "chat_id": chat_id,
         "text": text,
@@ -107,8 +144,11 @@ def show_rules(chat_id):
     send_message(chat_id, RULES_TEXT, keyboard=keyboard)
 
 
+# =========================================================
+# صفحه انتخاب نوع کالا
+# =========================================================
+
 def product_type_keyboard():
-    """ساخت دکمه‌های انتخاب نوع کالا در دو ستون."""
     items = list(PRODUCT_TYPES.items())
     rows = []
 
@@ -136,19 +176,54 @@ def show_product_types(chat_id):
         chat_id,
         "💎 <b>انتخاب نوع کالا</b>\n\n"
         "لطفاً فقط یک گزینه را برای این آگهی انتخاب کن.\n"
-        "پس از انتخاب، مراحل ثبت آگهی آغاز می‌شود.",
+        "اگر سکه را انتخاب کنی، نوع سکه نیز مشخص می‌شود.\n"
+        "وزن سکه پارسیان بر حسب سوت دریافت خواهد شد.",
         keyboard=product_type_keyboard(),
     )
 
 
+# =========================================================
+# صفحه انتخاب نوع سکه
+# =========================================================
+
+def coin_type_keyboard():
+    rows = []
+
+    for key, label in COIN_TYPES.items():
+        rows.append([{
+            "text": label,
+            "callback_data": f"coin:{key}",
+        }])
+
+    rows.append([{
+        "text": "❌ انصراف از ثبت آگهی",
+        "callback_data": "terms_cancel",
+    }])
+
+    return {"inline_keyboard": rows}
+
+
+def show_coin_types(chat_id):
+    send_message(
+        chat_id,
+        "🪙 <b>انتخاب نوع سکه</b>\n\n"
+        "لطفاً نوع سکه موردنظر را انتخاب کن.\n\n"
+        "🔸 وزن سکه پارسیان بر حسب سوت ثبت می‌شود.\n"
+        "🔸 وزن سایر کالاها و سکه‌ها بر حسب گرم خواهد بود.",
+        keyboard=coin_type_keyboard(),
+    )
+
+
+# =========================================================
+# پیام ثبت آگهی در گروه
+# =========================================================
+
 def send_registration_button_to_group():
     keyboard = {
-        "inline_keyboard": [[
-            {
-                "text": "🟡 ثبت آگهی با ربات",
-                "url": "https://t.me/ZarinMahGoldBot?start=sell",
-            }
-        ]]
+        "inline_keyboard": [[{
+            "text": "🟡 ثبت آگهی با ربات",
+            "url": "https://t.me/ZarinMahGoldBot?start=sell",
+        }]]
     }
 
     message = send_message(
@@ -167,8 +242,15 @@ def send_registration_button_to_group():
     return message
 
 
+# =========================================================
+# انتشار آگهی
+# =========================================================
+
 def send_listing_to_destination(
-    chat_id, caption, photo=None, thread_id=None
+    chat_id,
+    caption,
+    photo=None,
+    thread_id=None,
 ):
     if photo:
         data = {
@@ -182,6 +264,7 @@ def send_listing_to_destination(
             data["message_thread_id"] = thread_id
 
         message = telegram("sendPhoto", data)
+
     else:
         message = send_message(
             chat_id,
@@ -196,6 +279,10 @@ def send_listing_to_destination(
     }
 
 
+# =========================================================
+# منوی اصلی
+# =========================================================
+
 def main_keyboard(is_admin=False):
     rows = [
         [{"text": "ثبت آگهی فروش"}],
@@ -206,13 +293,20 @@ def main_keyboard(is_admin=False):
     if is_admin:
         rows.insert(2, [{"text": "ثبت محصول مدیر"}])
         rows.insert(3, [{"text": "آگهی‌های در انتظار"}])
-        rows.insert(4, [{"text": "📌 ارسال دکمه ثبت آگهی به گروه"}])
+        rows.insert(
+            4,
+            [{"text": "📌 ارسال دکمه ثبت آگهی به گروه"}],
+        )
 
     return {
         "keyboard": rows,
         "resize_keyboard": True,
     }
 
+
+# =========================================================
+# ذخیره و بازیابی اطلاعات از GitHub
+# =========================================================
 
 def load_state():
     response = session.get(GH_API, timeout=20)
@@ -244,8 +338,8 @@ def load_state():
     state.setdefault("next_id", 1)
 
     existing_ids = [
-        int(item.get("id", 0))
-        for item in state["listings"]
+        int(listing.get("id", 0))
+        for listing in state["listings"]
     ]
 
     if existing_ids:
@@ -279,6 +373,7 @@ def save_state(state, sha):
         json=payload,
         timeout=20,
     )
+
     response.raise_for_status()
 
     return response.json()["content"]["sha"]
@@ -298,6 +393,46 @@ def cancel_flow(user):
     user.pop("draft", None)
 
 
+# =========================================================
+# ابزارهای وزن
+# =========================================================
+
+def weight_unit(listing):
+    """
+    سکه پارسیان بر حسب سوت است.
+    سایر کالاها بر حسب گرم هستند.
+    """
+    if listing.get("coin_type_key") == "parsian":
+        return "سوت"
+
+    # آگهی‌های قدیمی نیز به‌صورت پیش‌فرض گرم هستند.
+    return listing.get("weight_unit") or "گرم"
+
+
+def formatted_weight(listing):
+    weight = html.escape(
+        str(listing.get("weight", "ثبت نشده"))
+    )
+    unit = weight_unit(listing)
+
+    return f"{weight} {unit}"
+
+
+def normalize_number(value):
+    value = str(value).translate(
+        str.maketrans(
+            "۰۱۲۳۴۵۶۷۸۹٠١٢٣٤٥٦٧٨٩٫٬",
+            "01234567890123456789..",
+        )
+    )
+
+    return value.replace(",", ".").strip()
+
+
+# =========================================================
+# شروع ثبت آگهی
+# =========================================================
+
 def start_listing(chat_id, user, kind):
     user["flow"] = "type"
     user["draft"] = {
@@ -309,13 +444,13 @@ def start_listing(chat_id, user, kind):
 
 
 def start_listing_after_type(chat_id, user, product_type):
-    """ثبت نوع انتخاب‌شده و آغاز مرحله عنوان."""
     draft = user.get("draft")
 
     if not draft or user.get("flow") != "type":
         send_message(
             chat_id,
-            "این مرحله منقضی شده است. لطفاً ثبت آگهی را دوباره آغاز کن.",
+            "این مرحله منقضی شده است. "
+            "لطفاً ثبت آگهی را دوباره آغاز کن.",
             main_keyboard(user.get("kind") == "admin"),
         )
         return
@@ -324,31 +459,89 @@ def start_listing_after_type(chat_id, user, product_type):
         send_message(chat_id, "نوع کالا معتبر نیست.")
         return
 
+    draft["product_type_key"] = product_type
     draft["product_type"] = PRODUCT_TYPES[product_type]
+
+    if product_type == "coin":
+        user["flow"] = "coin_type"
+        show_coin_types(chat_id)
+        return
+
+    draft.pop("coin_type_key", None)
+    draft.pop("coin_type", None)
+    draft["weight_unit"] = "گرم"
+
+    start_title_step(chat_id, user)
+
+
+def start_title_step(chat_id, user):
+    draft = user.get("draft") or {}
     user["flow"] = "title"
 
     send_message(
         chat_id,
-        "📝 ثبت آگهی فروش زرین ماه\n\n"
-        "مرحله ۲ از ۸: عنوان محصول\n"
-        f"نوع کالای انتخاب‌شده: {draft['product_type']}\n\n"
-        "عنوان محصول را بفرست.\n"
+        "📝 <b>ثبت آگهی فروش زرین ماه</b>\n\n"
+        "مرحله ۲: عنوان محصول\n"
+        f"نوع کالا: {html.escape(draft.get('product_type', ''))}\n"
+        + (
+            f"نوع سکه: {html.escape(draft['coin_type'])}\n"
+            if draft.get("coin_type")
+            else ""
+        )
+        + "\nعنوان محصول را بفرست.\n"
         "مثال: انگشتر طلای ۱۸ عیار\n\n"
         "برای لغو عملیات، /cancel را بفرست.",
     )
 
 
-def get_product_type(listing):
-    return listing.get("product_type") or "📦 سایر موارد"
+def start_listing_after_coin(chat_id, user, coin_key):
+    draft = user.get("draft")
 
+    if not draft or user.get("flow") != "coin_type":
+        send_message(
+            chat_id,
+            "این مرحله منقضی شده است. "
+            "لطفاً ثبت آگهی را دوباره آغاز کن.",
+        )
+        return
+
+    if coin_key not in COIN_TYPES:
+        send_message(chat_id, "نوع سکه معتبر نیست.")
+        return
+
+    draft["coin_type_key"] = coin_key
+    draft["coin_type"] = COIN_TYPES[coin_key]
+
+    if coin_key == "parsian":
+        draft["weight_unit"] = "سوت"
+    else:
+        draft["weight_unit"] = "گرم"
+
+    start_title_step(chat_id, user)
+
+
+# =========================================================
+# عنوان نوع کالا برای آگهی‌های قدیمی و جدید
+# =========================================================
+
+def get_product_type(listing):
+    product_type = listing.get("product_type") or "📦 سایر موارد"
+    coin_type = listing.get("coin_type")
+
+    if coin_type:
+        return f"{product_type} — {coin_type}"
+
+    return product_type
+
+
+# =========================================================
+# ساخت متن آگهی
+# =========================================================
 
 def build_listing_caption(listing, sold=False):
     title = html.escape(str(listing.get("title", "")))
     description = html.escape(
         str(listing.get("description", ""))
-    )
-    weight = html.escape(
-        str(listing.get("weight", "ثبت نشده"))
     )
     price = html.escape(str(listing.get("price", "")))
     contact = html.escape(str(listing.get("contact", "")))
@@ -356,6 +549,7 @@ def build_listing_caption(listing, sold=False):
         str(listing.get("city", "ثبت نشده"))
     )
     product_type = html.escape(get_product_type(listing))
+    weight_text = formatted_weight(listing)
 
     if listing.get("kind") == "admin":
         label = "محصول مدیر زرین ماه"
@@ -368,7 +562,7 @@ def build_listing_caption(listing, sold=False):
         f"💎 <b>نوع کالا:</b> {product_type}\n"
         f"📝 <b>{title}</b>\n\n"
         f"📋 {description}\n"
-        f"⚖️ <b>وزن طلا:</b> {weight} گرم\n"
+        f"⚖️ <b>وزن:</b> {weight_text}\n"
         f"💰 <b>قیمت اعلامی:</b> {price}\n"
         f"📍 <b>شهر:</b> {city}\n"
         f"📞 <b>راه ارتباطی:</b> {contact}\n\n"
@@ -380,6 +574,10 @@ def build_listing_caption(listing, sold=False):
 
     return caption
 
+
+# =========================================================
+# انتشار در کانال و گروه
+# =========================================================
 
 def publish_listing(listing):
     caption = build_listing_caption(listing)
@@ -435,6 +633,10 @@ def mark_listing_sold(listing):
         })
 
 
+# =========================================================
+# تکمیل ثبت آگهی و ارسال برای مدیر
+# =========================================================
+
 def finish_listing(state, user_id, chat_id):
     user = get_user(state, user_id)
     draft = user["draft"]
@@ -443,9 +645,13 @@ def finish_listing(state, user_id, chat_id):
         "id": state["next_id"],
         "owner_id": user_id,
         "kind": draft["kind"],
+        "product_type_key": draft.get("product_type_key"),
         "product_type": draft.get(
             "product_type", "📦 سایر موارد"
         ),
+        "coin_type_key": draft.get("coin_type_key"),
+        "coin_type": draft.get("coin_type"),
+        "weight_unit": draft.get("weight_unit", "گرم"),
         "title": draft["title"],
         "description": draft["description"],
         "weight": draft["weight"],
@@ -469,7 +675,8 @@ def finish_listing(state, user_id, chat_id):
         send_message(
             chat_id,
             "✅ اطلاعات محصول مدیر ثبت شد.\n"
-            "پس از ذخیره وضعیت، محصول در کانال و موضوع خریدوفروش گروه منتشر می‌شود.",
+            "پس از ذخیره وضعیت، محصول در کانال و موضوع "
+            "خریدوفروش گروه منتشر می‌شود.",
             main_keyboard(True),
         )
         return listing["id"]
@@ -479,7 +686,7 @@ def finish_listing(state, user_id, chat_id):
         f"🆔 شماره آگهی: {listing['id']}\n"
         f"📦 نوع کالا: {html.escape(get_product_type(listing))}\n"
         f"💎 عنوان: {html.escape(listing['title'])}\n"
-        f"⚖️ وزن: {html.escape(listing['weight'])} گرم\n"
+        f"⚖️ وزن: {formatted_weight(listing)}\n"
         f"📋 توضیحات: {html.escape(listing['description'])}\n"
         f"💰 قیمت: {html.escape(listing['price'])}\n"
         f"📍 شهر: {html.escape(listing.get('city', 'ثبت نشده'))}\n"
@@ -512,6 +719,10 @@ def finish_listing(state, user_id, chat_id):
     return None
 
 
+# =========================================================
+# دریافت پیام‌های کاربر
+# =========================================================
+
 def handle_message(state, message):
     chat_id = message["chat"]["id"]
     user_id = message["from"]["id"]
@@ -530,11 +741,13 @@ def handle_message(state, message):
         return None
 
     command_parts = text.split(maxsplit=1)
+
     command = (
         command_parts[0].split("@", 1)[0]
         if command_parts
         else ""
     )
+
     payload = (
         command_parts[1].strip().lower()
         if len(command_parts) > 1
@@ -565,7 +778,10 @@ def handle_message(state, message):
         send_message(
             chat_id,
             "برای ثبت آگهی، ابتدا نوع کالا را انتخاب کن؛ "
-            "سپس عنوان، توضیحات، وزن طلا، قیمت، راه ارتباطی و شهر را وارد کن.\n"
+            "سپس عنوان، توضیحات، وزن، قیمت، راه ارتباطی و شهر را وارد کن.\n\n"
+            "اگر نوع کالا سکه باشد، نوع سکه نیز انتخاب می‌شود.\n"
+            "وزن سکه پارسیان بر حسب سوت و وزن سایر کالاها "
+            "بر حسب گرم ثبت می‌شود.\n\n"
             "در پایان می‌توانی عکس محصول را هم ارسال کنی.\n"
             "هر آگهی فقط برای یک نوع کالا ثبت می‌شود.\n"
             "آگهی کاربران قبل از انتشار بررسی می‌شود.\n\n"
@@ -587,23 +803,26 @@ def handle_message(state, message):
     if text == "📌 ارسال دکمه ثبت آگهی به گروه" and is_admin:
         try:
             send_registration_button_to_group()
+
             send_message(
                 chat_id,
-                "✅ پیام دکمه‌دار ثبت آگهی در موضوع خریدوفروش ارسال و سنجاق شد.\n\n"
-                "اگر ارسال یا سنجاق انجام نشد، بررسی کن ربات در گروه "
-                "مجوز ارسال پیام و سنجاق‌کردن پیام را داشته باشد و "
-                "موضوع برای ارسال پیام توسط ربات بسته نباشد.",
+                "✅ پیام دکمه‌دار ثبت آگهی در موضوع خریدوفروش "
+                "ارسال و سنجاق شد.\n\n"
+                "اگر ارسال یا سنجاق انجام نشد، بررسی کن ربات "
+                "مجوز ارسال پیام و سنجاق‌کردن پیام را داشته باشد.",
                 main_keyboard(True),
             )
+
         except Exception:
             send_message(
                 chat_id,
                 "❌ ارسال یا سنجاق پیام انجام نشد.\n\n"
-                "لطفاً بررسی کن ربات مدیر گروه باشد و مجوز ارسال پیام "
-                "و سنجاق‌کردن پیام را داشته باشد. اگر موضوع خریدوفروش "
-                "بسته است، موقتاً آن را باز کن، دوباره تلاش کن و سپس ببند.",
+                "بررسی کن ربات مدیر گروه باشد و مجوز ارسال پیام "
+                "و سنجاق‌کردن پیام را داشته باشد. همچنین وضعیت "
+                "بسته یا باز بودن موضوع خریدوفروش را بررسی کن.",
                 main_keyboard(True),
             )
+
         return None
 
     if text == "آگهی‌های در انتظار" and is_admin:
@@ -638,10 +857,10 @@ def handle_message(state, message):
                 chat_id,
                 f"آگهی شماره {item['id']}\n"
                 f"نوع کالا: {html.escape(get_product_type(item))}\n"
-                f"عنوان: {html.escape(item['title'])}\n"
-                f"وزن: {html.escape(str(item.get('weight', 'ثبت نشده')))} گرم\n"
-                f"قیمت: {html.escape(item['price'])}\n"
-                f"شهر: {html.escape(item.get('city', 'ثبت نشده'))}",
+                f"عنوان: {html.escape(item.get('title', ''))}\n"
+                f"وزن: {formatted_weight(item)}\n"
+                f"قیمت: {html.escape(str(item.get('price', '')))}\n"
+                f"شهر: {html.escape(str(item.get('city', 'ثبت نشده')))}",
                 keyboard,
             )
 
@@ -657,13 +876,29 @@ def handle_message(state, message):
         )
         return None
 
-    draft = user["draft"]
+    draft = user.get("draft")
+
+    if not draft:
+        cancel_flow(user)
+        send_message(
+            chat_id,
+            "اطلاعات مرحله قبل پیدا نشد. لطفاً ثبت آگهی را دوباره آغاز کن.",
+            main_keyboard(is_admin),
+        )
+        return None
 
     if flow == "type":
         send_message(
             chat_id,
             "لطفاً نوع کالا را از دکمه‌های نمایش‌داده‌شده انتخاب کن.",
             keyboard=product_type_keyboard(),
+        )
+
+    elif flow == "coin_type":
+        send_message(
+            chat_id,
+            "لطفاً نوع سکه را از دکمه‌های نمایش‌داده‌شده انتخاب کن.",
+            keyboard=coin_type_keyboard(),
         )
 
     elif flow == "title":
@@ -673,6 +908,7 @@ def handle_message(state, message):
 
         draft["title"] = text[:150]
         user["flow"] = "description"
+
         send_message(chat_id, "توضیحات محصول را بفرست.")
 
     elif flow == "description":
@@ -682,26 +918,37 @@ def handle_message(state, message):
 
         draft["description"] = text[:700]
         user["flow"] = "weight"
-        send_message(
-            chat_id,
-            "⚖️ وزن طلا را به گرم وارد کن.\n"
-            "مثال: 2.500\n"
-            "می‌توانی از اعداد فارسی یا انگلیسی استفاده کنی.",
-        )
 
-    elif flow == "weight":
-        normalized = text.translate(
-            str.maketrans(
-                "۰۱۲۳۴۵۶۷۸۹٠١٢٣٤٥٦٧٨٩٫٬",
-                "01234567890123456789..",
-            )
-        ).replace(",", ".").strip()
-
-        if not re.fullmatch(r"\d+(?:\.\d{1,4})?", normalized):
+        if draft.get("coin_type_key") == "parsian":
             send_message(
                 chat_id,
-                "وزن معتبر نیست. فقط عدد مثبت بر حسب گرم وارد کن.\n"
-                "مثال: 2.500",
+                "⚖️ وزن سکه پارسیان را بر حسب <b>سوت</b> وارد کن.\n\n"
+                "مثال: ۵۰۰، ۷۵۰، ۱۰۰۰ یا ۱۵۰۰\n"
+                "هر ۱۰۰۰ سوت برابر با ۱ گرم است.\n"
+                "می‌توانی از اعداد فارسی یا انگلیسی استفاده کنی.",
+            )
+        else:
+            send_message(
+                chat_id,
+                "⚖️ وزن کالا را به گرم وارد کن.\n"
+                "مثال: 2.500\n"
+                "می‌توانی از اعداد فارسی یا انگلیسی استفاده کنی.",
+            )
+
+    elif flow == "weight":
+        normalized = normalize_number(text)
+
+        if not re.fullmatch(r"\d+(?:\.\d{1,4})?", normalized):
+            unit = weight_unit(draft)
+
+            send_message(
+                chat_id,
+                f"وزن معتبر نیست. لطفاً فقط عدد مثبت بر حسب {unit} وارد کن.\n"
+                + (
+                    "مثال: ۵۰۰، ۷۵۰، ۱۰۰۰ یا ۱۵۰۰ سوت"
+                    if unit == "سوت"
+                    else "مثال: 2.500 گرم"
+                ),
             )
             return None
 
@@ -710,16 +957,38 @@ def handle_message(state, message):
         except ValueError:
             weight_value = 0
 
-        if weight_value <= 0 or weight_value > 100000:
+        max_weight = (
+            1_000_000
+            if draft.get("coin_type_key") == "parsian"
+            else 100_000
+        )
+
+        if weight_value <= 0 or weight_value > max_weight:
             send_message(
                 chat_id,
                 "وزن باید بیشتر از صفر و در محدوده معتبر باشد.",
             )
             return None
 
-        draft["weight"] = (
-            f"{weight_value:.4f}".rstrip("0").rstrip(".")
-        )
+        if draft.get("coin_type_key") == "parsian":
+            # سوت باید عدد صحیح باشد.
+            if not weight_value.is_integer():
+                send_message(
+                    chat_id,
+                    "وزن سکه پارسیان را به‌صورت عدد صحیح سوت وارد کن.\n"
+                    "مثال: ۵۰۰ یا ۱۰۰۰",
+                )
+                return None
+
+            draft["weight"] = str(int(weight_value))
+            draft["weight_unit"] = "سوت"
+
+        else:
+            draft["weight"] = (
+                f"{weight_value:.4f}".rstrip("0").rstrip(".")
+            )
+            draft["weight_unit"] = "گرم"
+
         user["flow"] = "price"
         send_message(chat_id, "💰 قیمت پیشنهادی را بفرست.")
 
@@ -730,6 +999,7 @@ def handle_message(state, message):
 
         draft["price"] = text[:100]
         user["flow"] = "contact"
+
         send_message(
             chat_id,
             "راه ارتباطی فروشنده را بفرست؛ "
@@ -743,6 +1013,7 @@ def handle_message(state, message):
 
         draft["contact"] = text[:150]
         user["flow"] = "city"
+
         send_message(
             chat_id,
             "📍 شهر محل فروش را بنویس.\n"
@@ -756,6 +1027,7 @@ def handle_message(state, message):
 
         draft["city"] = text[:80]
         user["flow"] = "photo"
+
         send_message(
             chat_id,
             "حالا عکس محصول را بفرست.\n"
@@ -767,6 +1039,7 @@ def handle_message(state, message):
 
         if photos:
             draft["photo"] = photos[-1]["file_id"]
+
         elif text.lower() not in ("بدون عکس", "ندارم", "no"):
             send_message(
                 chat_id,
@@ -779,6 +1052,10 @@ def handle_message(state, message):
     return None
 
 
+# =========================================================
+# پردازش دکمه‌های تلگرام
+# =========================================================
+
 def handle_callback(state, callback, sha, update_id):
     user_id = callback["from"]["id"]
     callback_id = callback["id"]
@@ -788,7 +1065,10 @@ def handle_callback(state, callback, sha, update_id):
     chat = callback_message.get("chat") or {}
     chat_id = chat.get("id")
 
-    # پذیرش قوانین برای همه کاربران
+    # -----------------------------------------------------
+    # پذیرش قوانین
+    # -----------------------------------------------------
+
     if data == "terms_accept":
         if chat_id is None:
             telegram("answerCallbackQuery", {
@@ -809,7 +1089,10 @@ def handle_callback(state, callback, sha, update_id):
         start_listing(chat_id, user, "user")
         return sha
 
-    # انصراف از ثبت آگهی
+    # -----------------------------------------------------
+    # لغو ثبت آگهی
+    # -----------------------------------------------------
+
     if data == "terms_cancel":
         user = get_user(state, user_id)
         cancel_flow(user)
@@ -822,13 +1105,17 @@ def handle_callback(state, callback, sha, update_id):
         if chat_id is not None:
             send_message(
                 chat_id,
-                "عملیات ثبت آگهی لغو شد. هر زمان خواستی می‌توانی دوباره شروع کنی.",
+                "عملیات ثبت آگهی لغو شد. "
+                "هر زمان خواستی می‌توانی دوباره شروع کنی.",
                 main_keyboard(user_id == ADMIN_ID),
             )
 
         return sha
 
-    # انتخاب نوع کالا؛ برای کاربران و مدیر قابل استفاده است.
+    # -----------------------------------------------------
+    # انتخاب نوع کالا
+    # -----------------------------------------------------
+
     if data.startswith("type:"):
         user = get_user(state, user_id)
         product_type = data.split(":", 1)[1]
@@ -861,7 +1148,46 @@ def handle_callback(state, callback, sha, update_id):
         start_listing_after_type(chat_id, user, product_type)
         return sha
 
-    # سایر دکمه‌ها مخصوص مدیر هستند.
+    # -----------------------------------------------------
+    # انتخاب زیرگروه سکه
+    # -----------------------------------------------------
+
+    if data.startswith("coin:"):
+        user = get_user(state, user_id)
+        coin_key = data.split(":", 1)[1]
+
+        if (
+            chat_id is None
+            or user.get("flow") != "coin_type"
+            or not user.get("draft")
+        ):
+            telegram("answerCallbackQuery", {
+                "callback_query_id": callback_id,
+                "text": "این انتخاب منقضی شده است؛ ثبت آگهی را دوباره آغاز کن.",
+                "show_alert": True,
+            })
+            return sha
+
+        if coin_key not in COIN_TYPES:
+            telegram("answerCallbackQuery", {
+                "callback_query_id": callback_id,
+                "text": "نوع سکه معتبر نیست.",
+                "show_alert": True,
+            })
+            return sha
+
+        telegram("answerCallbackQuery", {
+            "callback_query_id": callback_id,
+            "text": f"انتخاب شد: {COIN_TYPES[coin_key]}",
+        })
+
+        start_listing_after_coin(chat_id, user, coin_key)
+        return sha
+
+    # -----------------------------------------------------
+    # سایر دکمه‌ها مخصوص مدیر
+    # -----------------------------------------------------
+
     if user_id != ADMIN_ID:
         telegram("answerCallbackQuery", {
             "callback_query_id": callback_id,
@@ -873,6 +1199,7 @@ def handle_callback(state, callback, sha, update_id):
     try:
         action, listing_id = data.split(":", 1)
         listing_id = int(listing_id)
+
     except (ValueError, TypeError):
         telegram("answerCallbackQuery", {
             "callback_query_id": callback_id,
@@ -896,6 +1223,10 @@ def handle_callback(state, callback, sha, update_id):
             "show_alert": True,
         })
         return sha
+
+    # -----------------------------------------------------
+    # علامت‌گذاری آگهی به‌عنوان فروش‌رفته
+    # -----------------------------------------------------
 
     if action == "sold":
         if listing.get("status") == "sold":
@@ -926,7 +1257,12 @@ def handle_callback(state, callback, sha, update_id):
             ADMIN_ID,
             f"✅ آگهی شماره {listing_id} به‌عنوان فروش‌رفته ثبت شد.",
         )
+
         return sha
+
+    # -----------------------------------------------------
+    # جلوگیری از بررسی دوباره
+    # -----------------------------------------------------
 
     if listing.get("status") != "pending":
         telegram("answerCallbackQuery", {
@@ -936,15 +1272,22 @@ def handle_callback(state, callback, sha, update_id):
         })
         return sha
 
+    # -----------------------------------------------------
+    # تأیید آگهی
+    # -----------------------------------------------------
+
     if action == "approve":
         listing.setdefault("weight", "ثبت نشده")
         listing.setdefault("city", "ثبت نشده")
         listing.setdefault("product_type", "📦 سایر موارد")
+        listing.setdefault("weight_unit", "گرم")
+
         listing["status"] = "publishing"
         state["last_update_id"] = update_id
         sha = save_state(state, sha)
 
         publish_listing(listing)
+
         listing["status"] = "published"
         sha = save_state(state, sha)
 
@@ -966,6 +1309,7 @@ def handle_callback(state, callback, sha, update_id):
             f"🆔 شماره آگهی: {listing['id']}\n"
             f"📦 نوع کالا: {html.escape(get_product_type(listing))}\n"
             f"💎 {html.escape(listing.get('title', ''))}\n"
+            f"⚖️ وزن: {formatted_weight(listing)}\n"
             f"📍 شهر: {html.escape(listing.get('city', 'ثبت نشده'))}\n\n"
             "اگر کالا فروش رفت، دکمه زیر را بزن:",
             sold_keyboard,
@@ -975,6 +1319,10 @@ def handle_callback(state, callback, sha, update_id):
             listing["owner_id"],
             "✅ آگهی شما پس از بررسی در موضوع خریدوفروش گروه منتشر شد.",
         )
+
+    # -----------------------------------------------------
+    # رد آگهی
+    # -----------------------------------------------------
 
     elif action == "reject":
         listing["status"] = "rejected"
@@ -986,8 +1334,8 @@ def handle_callback(state, callback, sha, update_id):
 
         send_message(
             listing["owner_id"],
-            "متأسفانه آگهی شما تأیید نشد. برای ارسال دوباره، "
-            "از منوی ربات یک آگهی جدید ثبت کن.",
+            "متأسفانه آگهی شما تأیید نشد. "
+            "برای ارسال دوباره، از منوی ربات یک آگهی جدید ثبت کن.",
         )
 
     else:
@@ -999,6 +1347,10 @@ def handle_callback(state, callback, sha, update_id):
 
     return sha
 
+
+# =========================================================
+# وبهوک
+# =========================================================
 
 class handler(BaseHTTPRequestHandler):
 
@@ -1019,7 +1371,8 @@ class handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         received_secret = self.headers.get(
-            "X-Telegram-Bot-Api-Secret-Token", ""
+            "X-Telegram-Bot-Api-Secret-Token",
+            "",
         )
 
         if not hmac.compare_digest(
@@ -1030,7 +1383,9 @@ class handler(BaseHTTPRequestHandler):
             return
 
         try:
-            length = int(self.headers.get("Content-Length", "0"))
+            length = int(
+                self.headers.get("Content-Length", "0")
+            )
 
             if length <= 0 or length > 1_000_000:
                 self.respond(400, "Invalid request size")
@@ -1076,6 +1431,7 @@ class handler(BaseHTTPRequestHandler):
             state["last_update_id"] = update_id
             sha = save_state(state, sha)
 
+            # انتشار محصول مدیر پس از ذخیره اطلاعات
             if admin_listing_id is not None:
                 listing = next(
                     (
@@ -1085,9 +1441,11 @@ class handler(BaseHTTPRequestHandler):
                     None,
                 )
 
-                if listing and listing.get("status") == "publishing":
+                if (
+                    listing
+                    and listing.get("status") == "publishing"
+                ):
                     publish_listing(listing)
-
                     listing["status"] = "published"
                     sha = save_state(state, sha)
 
@@ -1100,9 +1458,12 @@ class handler(BaseHTTPRequestHandler):
 
                     send_message(
                         ADMIN_ID,
-                        "✅ محصول مدیر در کانال زرین ماه و موضوع خریدوفروش گروه منتشر شد.\n"
+                        "✅ محصول مدیر در کانال زرین ماه و "
+                        "موضوع خریدوفروش گروه منتشر شد.\n"
                         f"🆔 شماره آگهی: {listing['id']}\n"
-                        f"📦 نوع کالا: {html.escape(get_product_type(listing))}\n"
+                        f"📦 نوع کالا: "
+                        f"{html.escape(get_product_type(listing))}\n"
+                        f"⚖️ وزن: {formatted_weight(listing)}\n"
                         "اگر کالا فروش رفت، دکمه زیر را بزن:",
                         sold_keyboard,
                     )
