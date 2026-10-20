@@ -70,7 +70,7 @@ def send_registration_button_to_group():
     keyboard = {
         "inline_keyboard": [[
             {
-                "text": "🟡 ثبت آگهی با ربات 🤖",
+                "text": "🟡 ثبت آگهی با ربات ",
                 "url": "https://t.me/ZarinMahGoldBot?start=sell",
             }
         ]]
