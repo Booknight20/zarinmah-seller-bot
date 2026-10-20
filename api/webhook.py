@@ -1,3 +1,4 @@
+
 import os
 import json
 import base64
@@ -25,15 +26,16 @@ GH_API = (
     f"{DATA_REPO}/contents/state.json"
 )
 
+# متن نهایی قوانین ثبت آگهی زرین ماه
 RULES_TEXT = (
-    "📜 <b>قوانین و مقررات ثبت آگهی زرین ماه</b>\n\n"
-    "۱. اطلاعات کالا، وزن، عیار و قیمت باید دقیق و واقعی باشد.\n\n"
-    "۲. فروشنده باید مالک کالا باشد یا اجازه فروش آن را داشته باشد.\n\n"
-    "۳. مسئولیت اصالت کالا و صحت اطلاعات آگهی بر عهده فروشنده است.\n\n"
-    "۴. مسئولیت بررسی کالا و توافق نهایی بر عهده طرفین معامله است.\n\n"
-    "۵. آگهی‌های کاربران قبل از انتشار توسط مدیر بررسی می‌شوند.\n\n"
-    "۶. آگهی‌های خلاف واقع یا مغایر قوانین منتشر نخواهند شد.\n\n"
-    "با انتخاب «پذیرش قوانین و ادامه»، موافقت خود را با این مقررات اعلام می‌کنی."
+    "📋 <b>قوانین ثبت آگهی زرین ماه</b>\n\n"
+    "🔹 اطلاعات طلا، وزن، عیار و قیمت باید دقیق باشد.\n\n"
+    "🔹 فروشنده باید مالک طلا یا مجاز به فروش آن باشد.\n\n"
+    "🔹 داشتن فاکتور فروش معتبر الزامی است.\n\n"
+    "🔹 آگهی‌ها پیش از انتشار بررسی می‌شوند.\n\n"
+    "🔹 بررسی اصالت طلا و شرایط معامله بر عهده خریدار و فروشنده است.\n\n"
+    "🔹 درج اطلاعات خلاف واقع ممنوع است.\n\n"
+    "با پذیرش قوانین، می‌توانید ثبت آگهی را آغاز کنید."
 )
 
 session = requests.Session()
@@ -76,7 +78,7 @@ def send_message(chat_id, text, keyboard=None, message_thread_id=None):
 
 
 def show_rules(chat_id):
-    """نمایش قوانین پیش از شروع ثبت آگهی."""
+    """نمایش قوانین و دریافت انتخاب کاربر."""
     keyboard = {
         "inline_keyboard": [
             [{
@@ -84,7 +86,7 @@ def show_rules(chat_id):
                 "callback_data": "terms_accept",
             }],
             [{
-                "text": "❌ انصراف",
+                "text": "❌ انصراف از ثبت آگهی",
                 "callback_data": "terms_cancel",
             }],
         ]
@@ -125,7 +127,7 @@ def send_registration_button_to_group():
 
 
 def send_listing_to_destination(chat_id, caption, photo=None, thread_id=None):
-    """ارسال آگهی و برگرداندن شناسه پیام."""
+    """ارسال آگهی و برگرداندن شناسه پیام برای ویرایش بعدی."""
     if photo:
         data = {
             "chat_id": chat_id,
@@ -302,7 +304,8 @@ def publish_listing(listing):
     photo = listing.get("photo")
     published_messages = []
 
-    # محصولات مدیر در کانال و گروه؛ آگهی کاربران فقط در گروه.
+    # محصولات مدیر در کانال و گروه منتشر می‌شوند.
+    # آگهی کاربران فقط در گروه منتشر می‌شود.
     if listing.get("kind") == "admin":
         published_messages.append(
             send_listing_to_destination(
@@ -489,11 +492,13 @@ def handle_message(state, message):
             chat_id,
             "سلام! به ربات فروشندگان زرین ماه خوش آمدی. 🌙\n\n"
             "برای ثبت آگهی، گزینهٔ «ثبت آگهی فروش» را بزن.\n"
-            "اگر از لینک مستقیم ثبت آگهی وارد شده‌ای، "
-            "ابتدا قوانین را مشاهده و تأیید کن.\n\n"
             "آگهی کاربران پس از تأیید مدیر منتشر می‌شود.",
             main_keyboard(is_admin),
         )
+        return None
+
+    if text == "📜 قوانین و مقررات":
+        show_rules(chat_id)
         return None
 
     if text == "راهنمای ثبت آگهی":
@@ -506,10 +511,6 @@ def handle_message(state, message):
             "برای لغو هر زمان /cancel را بفرست.",
             main_keyboard(is_admin),
         )
-        return None
-
-    if text == "📜 قوانین و مقررات":
-        show_rules(chat_id)
         return None
 
     if text == "ثبت آگهی فروش":
@@ -713,7 +714,7 @@ def handle_callback(state, callback, sha, update_id):
     callback_id = callback["id"]
     data = callback.get("data", "")
 
-    # پذیرش قوانین توسط کاربر؛ این دکمه برای همه کاربران است.
+    # پذیرش قوانین برای همه کاربران مجاز است.
     if data == "terms_accept":
         callback_message = callback.get("message") or {}
         chat = callback_message.get("chat") or {}
@@ -761,7 +762,7 @@ def handle_callback(state, callback, sha, update_id):
 
         return sha
 
-    # سایر دکمه‌های مدیریتی فقط برای مدیر هستند.
+    # سایر دکمه‌ها مخصوص مدیر هستند.
     if user_id != ADMIN_ID:
         telegram("answerCallbackQuery", {
             "callback_query_id": callback_id,
