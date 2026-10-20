@@ -1,4 +1,3 @@
-
 import os
 import json
 import base64
@@ -24,6 +23,17 @@ TG_API = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
 GH_API = (
     f"https://api.github.com/repos/"
     f"{DATA_REPO}/contents/state.json"
+)
+
+RULES_TEXT = (
+    "📜 <b>قوانین و مقررات ثبت آگهی زرین ماه</b>\n\n"
+    "۱. اطلاعات کالا، وزن، عیار و قیمت باید دقیق و واقعی باشد.\n\n"
+    "۲. فروشنده باید مالک کالا باشد یا اجازه فروش آن را داشته باشد.\n\n"
+    "۳. مسئولیت اصالت کالا و صحت اطلاعات آگهی بر عهده فروشنده است.\n\n"
+    "۴. مسئولیت بررسی کالا و توافق نهایی بر عهده طرفین معامله است.\n\n"
+    "۵. آگهی‌های کاربران قبل از انتشار توسط مدیر بررسی می‌شوند.\n\n"
+    "۶. آگهی‌های خلاف واقع یا مغایر قوانین منتشر نخواهند شد.\n\n"
+    "با انتخاب «پذیرش قوانین و ادامه»، موافقت خود را با این مقررات اعلام می‌کنی."
 )
 
 session = requests.Session()
@@ -65,12 +75,34 @@ def send_message(chat_id, text, keyboard=None, message_thread_id=None):
     return telegram("sendMessage", data)
 
 
+def show_rules(chat_id):
+    """نمایش قوانین پیش از شروع ثبت آگهی."""
+    keyboard = {
+        "inline_keyboard": [
+            [{
+                "text": "✅ پذیرش قوانین و ادامه",
+                "callback_data": "terms_accept",
+            }],
+            [{
+                "text": "❌ انصراف",
+                "callback_data": "terms_cancel",
+            }],
+        ]
+    }
+
+    send_message(
+        chat_id,
+        RULES_TEXT,
+        keyboard=keyboard,
+    )
+
+
 def send_registration_button_to_group():
-    """ارسال و سنجاق طرح نهایی ثبت آگهی در موضوع خریدوفروش."""
+    """ارسال و سنجاق دکمه ثبت آگهی در موضوع خریدوفروش."""
     keyboard = {
         "inline_keyboard": [[
             {
-                "text": "🟡 ثبت آگهی با ربات ",
+                "text": "🟡 ثبت آگهی با ربات",
                 "url": "https://t.me/ZarinMahGoldBot?start=sell",
             }
         ]]
@@ -93,7 +125,7 @@ def send_registration_button_to_group():
 
 
 def send_listing_to_destination(chat_id, caption, photo=None, thread_id=None):
-    """ارسال آگهی و برگرداندن شناسه پیام برای ویرایش بعدی."""
+    """ارسال آگهی و برگرداندن شناسه پیام."""
     if photo:
         data = {
             "chat_id": chat_id,
@@ -101,8 +133,10 @@ def send_listing_to_destination(chat_id, caption, photo=None, thread_id=None):
             "caption": caption[:1000],
             "parse_mode": "HTML",
         }
+
         if thread_id is not None:
             data["message_thread_id"] = thread_id
+
         message = telegram("sendPhoto", data)
     else:
         message = send_message(
@@ -121,13 +155,14 @@ def send_listing_to_destination(chat_id, caption, photo=None, thread_id=None):
 def main_keyboard(is_admin=False):
     rows = [
         [{"text": "ثبت آگهی فروش"}],
+        [{"text": "📜 قوانین و مقررات"}],
         [{"text": "راهنمای ثبت آگهی"}],
     ]
 
     if is_admin:
-        rows.insert(1, [{"text": "ثبت محصول مدیر"}])
-        rows.insert(2, [{"text": "آگهی‌های در انتظار"}])
-        rows.insert(3, [{"text": "📌 ارسال دکمه ثبت آگهی به گروه"}])
+        rows.insert(2, [{"text": "ثبت محصول مدیر"}])
+        rows.insert(3, [{"text": "آگهی‌های در انتظار"}])
+        rows.insert(4, [{"text": "📌 ارسال دکمه ثبت آگهی به گروه"}])
 
     return {
         "keyboard": rows,
@@ -267,10 +302,14 @@ def publish_listing(listing):
     photo = listing.get("photo")
     published_messages = []
 
-    # محصولات مدیر در کانال و گروه؛ آگهی کاربران فقط در گروه منتشر می‌شود.
+    # محصولات مدیر در کانال و گروه؛ آگهی کاربران فقط در گروه.
     if listing.get("kind") == "admin":
         published_messages.append(
-            send_listing_to_destination(CHANNEL, caption, photo=photo)
+            send_listing_to_destination(
+                CHANNEL,
+                caption,
+                photo=photo,
+            )
         )
 
     published_messages.append(
@@ -291,6 +330,7 @@ def mark_listing_sold(listing):
     for posted in listing.get("published_messages", []):
         chat_id = posted.get("chat_id")
         message_id = posted.get("message_id")
+
         if not chat_id or not message_id:
             continue
 
@@ -301,14 +341,19 @@ def mark_listing_sold(listing):
             method = "editMessageText"
             field = "text"
 
-        # متن پایه را از محتوای ثبت‌شده می‌سازیم تا برچسب دوبار اضافه نشود.
         title = html.escape(str(listing.get("title", "")))
         description = html.escape(str(listing.get("description", "")))
         weight = html.escape(str(listing.get("weight", "ثبت نشده")))
         price = html.escape(str(listing.get("price", "")))
         contact = html.escape(str(listing.get("contact", "")))
         city = html.escape(str(listing.get("city", "ثبت نشده")))
-        label = "محصول مدیر زرین ماه" if listing.get("kind") == "admin" else "آگهی فروش کاربر"
+
+        label = (
+            "محصول مدیر زرین ماه"
+            if listing.get("kind") == "admin"
+            else "آگهی فروش کاربر"
+        )
+
         text = (
             "🌙 <b>زرین ماه | طلای کم‌اجرت</b>\n\n"
             f"🏷 <b>{label}</b>\n"
@@ -321,6 +366,7 @@ def mark_listing_sold(listing):
             "#محصولات_برای_فروش\n\n"
             "✅ <b>فروخته شد</b>"
         )
+
         telegram(method, {
             "chat_id": chat_id,
             "message_id": message_id,
@@ -421,7 +467,11 @@ def handle_message(state, message):
 
     # پشتیبانی از /start، /start sell و /start@BotUsername sell
     command_parts = text.split(maxsplit=1)
-    command = command_parts[0].split("@", 1)[0] if command_parts else ""
+    command = (
+        command_parts[0].split("@", 1)[0]
+        if command_parts
+        else ""
+    )
     payload = (
         command_parts[1].strip().lower()
         if len(command_parts) > 1
@@ -431,10 +481,8 @@ def handle_message(state, message):
     if command == "/start":
         cancel_flow(user)
 
-        # لینک مستقیم ثبت آگهی:
-        # https://t.me/ZarinMahGoldBot?start=sell
         if payload == "sell":
-            start_listing(chat_id, user, "user")
+            show_rules(chat_id)
             return None
 
         send_message(
@@ -442,7 +490,7 @@ def handle_message(state, message):
             "سلام! به ربات فروشندگان زرین ماه خوش آمدی. 🌙\n\n"
             "برای ثبت آگهی، گزینهٔ «ثبت آگهی فروش» را بزن.\n"
             "اگر از لینک مستقیم ثبت آگهی وارد شده‌ای، "
-            "می‌توانی از لینک ثبت آگهی استفاده کنی.\n\n"
+            "ابتدا قوانین را مشاهده و تأیید کن.\n\n"
             "آگهی کاربران پس از تأیید مدیر منتشر می‌شود.",
             main_keyboard(is_admin),
         )
@@ -456,11 +504,17 @@ def handle_message(state, message):
             "در پایان می‌توانی عکس محصول را هم ارسال کنی.\n"
             "آگهی کاربران قبل از انتشار بررسی می‌شود.\n\n"
             "برای لغو هر زمان /cancel را بفرست.",
+            main_keyboard(is_admin),
         )
         return None
 
+    if text == "📜 قوانین و مقررات":
+        show_rules(chat_id)
+        return None
+
     if text == "ثبت آگهی فروش":
-        start_listing(chat_id, user, "user")
+        cancel_flow(user)
+        show_rules(chat_id)
         return None
 
     if text == "ثبت محصول مدیر" and is_admin:
@@ -473,14 +527,18 @@ def handle_message(state, message):
             send_message(
                 chat_id,
                 "✅ پیام دکمه‌دار ثبت آگهی در موضوع خریدوفروش ارسال و سنجاق شد.\n\n"
-                "اگر ارسال یا سنجاق انجام نشد، بررسی کن ربات در گروه مجوز ارسال پیام و سنجاق‌کردن پیام را داشته باشد و موضوع برای ارسال پیام توسط ربات بسته نباشد.",
+                "اگر ارسال یا سنجاق انجام نشد، بررسی کن ربات در گروه "
+                "مجوز ارسال پیام و سنجاق‌کردن پیام را داشته باشد و "
+                "موضوع برای ارسال پیام توسط ربات بسته نباشد.",
                 main_keyboard(True),
             )
         except Exception:
             send_message(
                 chat_id,
                 "❌ ارسال یا سنجاق پیام انجام نشد.\n\n"
-                "لطفاً بررسی کن ربات مدیر گروه باشد و مجوز ارسال پیام و سنجاق‌کردن پیام را داشته باشد. اگر موضوع خریدوفروش بسته است، موقتاً آن را باز کن، دوباره تلاش کن و سپس ببند.",
+                "لطفاً بررسی کن ربات مدیر گروه باشد و مجوز ارسال پیام "
+                "و سنجاق‌کردن پیام را داشته باشد. اگر موضوع خریدوفروش "
+                "بسته است، موقتاً آن را باز کن، دوباره تلاش کن و سپس ببند.",
                 main_keyboard(True),
             )
         return None
@@ -495,6 +553,7 @@ def handle_message(state, message):
             send_message(
                 chat_id,
                 "در حال حاضر آگهی در انتظاری وجود ندارد.",
+                main_keyboard(True),
             )
             return None
 
@@ -654,6 +713,55 @@ def handle_callback(state, callback, sha, update_id):
     callback_id = callback["id"]
     data = callback.get("data", "")
 
+    # پذیرش قوانین توسط کاربر؛ این دکمه برای همه کاربران است.
+    if data == "terms_accept":
+        callback_message = callback.get("message") or {}
+        chat = callback_message.get("chat") or {}
+        chat_id = chat.get("id")
+
+        if chat_id is None:
+            telegram("answerCallbackQuery", {
+                "callback_query_id": callback_id,
+                "text": "خطا در دریافت اطلاعات کاربر.",
+                "show_alert": True,
+            })
+            return sha
+
+        user = get_user(state, user_id)
+        cancel_flow(user)
+
+        telegram("answerCallbackQuery", {
+            "callback_query_id": callback_id,
+            "text": "قوانین پذیرفته شد.",
+        })
+
+        start_listing(chat_id, user, "user")
+        return sha
+
+    # انصراف از ثبت آگهی
+    if data == "terms_cancel":
+        callback_message = callback.get("message") or {}
+        chat = callback_message.get("chat") or {}
+        chat_id = chat.get("id")
+
+        user = get_user(state, user_id)
+        cancel_flow(user)
+
+        telegram("answerCallbackQuery", {
+            "callback_query_id": callback_id,
+            "text": "ثبت آگهی لغو شد.",
+        })
+
+        if chat_id is not None:
+            send_message(
+                chat_id,
+                "عملیات ثبت آگهی لغو شد. هر زمان خواستی می‌توانی دوباره شروع کنی.",
+                main_keyboard(user_id == ADMIN_ID),
+            )
+
+        return sha
+
+    # سایر دکمه‌های مدیریتی فقط برای مدیر هستند.
     if user_id != ADMIN_ID:
         telegram("answerCallbackQuery", {
             "callback_query_id": callback_id,
@@ -674,7 +782,10 @@ def handle_callback(state, callback, sha, update_id):
         return sha
 
     listing = next(
-        (item for item in state["listings"] if int(item.get("id", -1)) == listing_id),
+        (
+            item for item in state["listings"]
+            if int(item.get("id", -1)) == listing_id
+        ),
         None,
     )
 
@@ -702,15 +813,19 @@ def handle_callback(state, callback, sha, update_id):
             })
             return sha
 
-        # اول در مقصدها برچسب می‌زنیم، سپس وضعیت را ذخیره می‌کنیم.
         mark_listing_sold(listing)
         listing["status"] = "sold"
         sha = save_state(state, sha)
+
         telegram("answerCallbackQuery", {
             "callback_query_id": callback_id,
             "text": "برچسب فروش‌رفته روی آگهی درج شد.",
         })
-        send_message(ADMIN_ID, f"✅ آگهی شماره {listing_id} به‌عنوان فروش‌رفته ثبت شد.")
+
+        send_message(
+            ADMIN_ID,
+            f"✅ آگهی شماره {listing_id} به‌عنوان فروش‌رفته ثبت شد.",
+        )
         return sha
 
     if listing.get("status") != "pending":
@@ -743,6 +858,7 @@ def handle_callback(state, callback, sha, update_id):
                 "callback_data": f"sold:{listing['id']}",
             }]]
         }
+
         send_message(
             ADMIN_ID,
             "📣 آگهی منتشر شد.\n"
@@ -752,6 +868,7 @@ def handle_callback(state, callback, sha, update_id):
             "اگر کالا فروش رفت، دکمه زیر را بزن:",
             sold_keyboard,
         )
+
         send_message(
             listing["owner_id"],
             "✅ آگهی شما پس از بررسی در موضوع خریدوفروش گروه منتشر شد.",
@@ -759,10 +876,12 @@ def handle_callback(state, callback, sha, update_id):
 
     elif action == "reject":
         listing["status"] = "rejected"
+
         telegram("answerCallbackQuery", {
             "callback_query_id": callback_id,
             "text": "آگهی رد شد.",
         })
+
         send_message(
             listing["owner_id"],
             "متأسفانه آگهی شما تأیید نشد. برای ارسال دوباره، "
@@ -802,7 +921,8 @@ class handler(BaseHTTPRequestHandler):
         )
 
         if not hmac.compare_digest(
-            received_secret, WEBHOOK_SECRET
+            received_secret,
+            WEBHOOK_SECRET,
         ):
             self.respond(403, "Forbidden")
             return
@@ -833,10 +953,12 @@ class handler(BaseHTTPRequestHandler):
                 callback = update["callback_query"]
 
                 sha = handle_callback(
-                    state, callback, sha, update_id
+                    state,
+                    callback,
+                    sha,
+                    update_id,
                 )
 
-                # وضعیت نهایی آپدیت ذخیره می‌شود.
                 state["last_update_id"] = update_id
                 sha = save_state(state, sha)
 
@@ -845,7 +967,8 @@ class handler(BaseHTTPRequestHandler):
 
             elif "message" in update:
                 admin_listing_id = handle_message(
-                    state, update["message"]
+                    state,
+                    update["message"],
                 )
 
             state["last_update_id"] = update_id
@@ -872,6 +995,7 @@ class handler(BaseHTTPRequestHandler):
                             "callback_data": f"sold:{listing['id']}",
                         }]]
                     }
+
                     send_message(
                         ADMIN_ID,
                         "✅ محصول مدیر در کانال زرین ماه و موضوع خریدوفروش گروه منتشر شد.\n"
@@ -879,7 +1003,12 @@ class handler(BaseHTTPRequestHandler):
                         "اگر کالا فروش رفت، دکمه زیر را بزن:",
                         sold_keyboard,
                     )
-                    send_message(ADMIN_ID, "منوی مدیریت:", main_keyboard(True))
+
+                    send_message(
+                        ADMIN_ID,
+                        "منوی مدیریت:",
+                        main_keyboard(True),
+                    )
 
             self.respond(200, "OK")
 
