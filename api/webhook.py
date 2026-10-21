@@ -337,7 +337,7 @@ def show_coin_types(chat_id):
 
 PRICE_METHODS = {
     "fixed": "قیمت ثابت",
-    "below_board": "درصد زیر قیمت تابلو",
+    "below_board": "درصد بالا قیمت تابلو",
     "above_board": "مبلغ بالاتر از تابلو",
     "board": "به قیمت تابلو",
     "negotiable": "قیمت توافقی",
