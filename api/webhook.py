@@ -1622,13 +1622,23 @@ def handle_message(state, message):
         return None
 
     # توضیحات
-    if flow == "description":
+       if flow == "description":
         if not text:
             send_message(
                 chat_id,
                 "توضیحات را بنویس یا دکمه «بدون توضیحات» را انتخاب کن.",
             )
             return None
+
+        draft["description"] = text[:700]
+
+        if draft.get("editing"):
+            finish_edit_or_continue(chat_id, user)
+        else:
+            user["flow"] = "price_method"
+            show_price_methods(chat_id)
+
+        return None
 
         draft["description"] = text[:700]
         finish_edit_or_continue(chat_id, user)
