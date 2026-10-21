@@ -1622,7 +1622,7 @@ def handle_message(state, message):
         return None
 
     # توضیحات
-       if flow == "description":
+    if flow == "description":
         if not text:
             send_message(
                 chat_id,
@@ -1632,16 +1632,13 @@ def handle_message(state, message):
 
         draft["description"] = text[:700]
 
+        # هنگام ویرایش، به پیش‌نمایش برگرد؛ در ثبت عادی، روش قیمت‌گذاری را بپرس.
         if draft.get("editing"):
             finish_edit_or_continue(chat_id, user)
         else:
             user["flow"] = "price_method"
             show_price_methods(chat_id)
 
-        return None
-
-        draft["description"] = text[:700]
-        finish_edit_or_continue(chat_id, user)
         return None
 
     # وزن
