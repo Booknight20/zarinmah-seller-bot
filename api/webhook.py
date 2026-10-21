@@ -1693,7 +1693,12 @@ def handle_message(state, message):
             )
             draft["weight_unit"] = "گرم"
 
-        finish_edit_or_continue(chat_id, user)
+        # پس از دریافت وزن، در ثبت عادی باید توضیحات پرسیده شود.
+        # در حالت ویرایش، به پیش‌نمایش آگهی برگرد.
+        if draft.get("editing"):
+            finish_edit_or_continue(chat_id, user)
+        else:
+            start_description_step(chat_id, user)
         return None
 
     # قیمت
