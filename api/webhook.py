@@ -1,3 +1,4 @@
+
 import os
 import json
 import base64
@@ -79,7 +80,6 @@ PRODUCT_TYPES = {
     "other": "📦 سایر موارد",
 }
 
-
 JEWELRY_TYPES = {
     "ring",
     "earrings",
@@ -105,8 +105,6 @@ COIN_TYPES = {
     "other_coin": "سایر سکه‌ها",
 }
 
-
-# سکه‌های استاندارد که در این ربات وزن آن‌ها پرسیده نمی‌شود.
 STANDARD_COIN_TYPES = {
     "emami",
     "bahar_azadi",
@@ -337,7 +335,7 @@ def show_coin_types(chat_id):
 
 PRICE_METHODS = {
     "fixed": "قیمت ثابت",
-    "below_board": "درصد بالا قیمت تابلو",
+    "above_board_percent": "درصد بالاتر از قیمت تابلو",
     "above_board": "مبلغ بالاتر از تابلو",
     "board": "به قیمت تابلو",
     "negotiable": "قیمت توافقی",
@@ -346,36 +344,26 @@ PRICE_METHODS = {
 
 def price_method_keyboard():
     rows = [
-        [
-            {
-                "text": "💵 قیمت ثابت",
-                "callback_data": "price_method:fixed",
-            },
-        ],
-        [
-            {
-                "text": "📉 درصد زیر قیمت تابلو",
-                "callback_data": "price_method:below_board",
-            },
-        ],
-        [
-            {
-                "text": "📈 مبلغ بالاتر از تابلو",
-                "callback_data": "price_method:above_board",
-            },
-        ],
-        [
-            {
-                "text": "📊 به قیمت تابلو",
-                "callback_data": "price_method:board",
-            },
-        ],
-        [
-            {
-                "text": "🤝 قیمت توافقی",
-                "callback_data": "price_method:negotiable",
-            },
-        ],
+        [{
+            "text": "💵 قیمت ثابت",
+            "callback_data": "price_method:fixed",
+        }],
+        [{
+            "text": "📈 درصد بالاتر از قیمت تابلو",
+            "callback_data": "price_method:above_board_percent",
+        }],
+        [{
+            "text": "➕ مبلغ بالاتر از تابلو",
+            "callback_data": "price_method:above_board",
+        }],
+        [{
+            "text": "📊 به قیمت تابلو",
+            "callback_data": "price_method:board",
+        }],
+        [{
+            "text": "🤝 قیمت توافقی",
+            "callback_data": "price_method:negotiable",
+        }],
     ]
 
     return {"inline_keyboard": rows}
@@ -387,8 +375,8 @@ def show_price_methods(chat_id):
         "💰 <b>روش قیمت‌گذاری</b>\n\n"
         "یکی از روش‌های زیر را انتخاب کن:\n\n"
         "💵 <b>قیمت ثابت:</b> مبلغ نهایی کل کالا را وارد می‌کنی.\n\n"
-        "📉 <b>درصد زیر تابلو:</b> درصد کمتر از قیمت مرجع را مشخص می‌کنی.\n\n"
-        "📈 <b>مبلغ بالاتر از تابلو:</b> مبلغ اضافه بر قیمت مرجع را وارد می‌کنی.\n\n"
+        "📈 <b>درصد بالاتر از تابلو:</b> درصد افزایش نسبت به قیمت مرجع را مشخص می‌کنی.\n\n"
+        "➕ <b>مبلغ بالاتر از تابلو:</b> مبلغ اضافه بر قیمت مرجع را وارد می‌کنی.\n\n"
         "📊 <b>به قیمت تابلو:</b> فروش بر مبنای قیمت مرجع مورد توافق.\n\n"
         "🤝 <b>قیمت توافقی:</b> مبلغ نهایی با خریدار مذاکره می‌شود.\n\n"
         "⚠️ قیمت تابلو در این ربات به‌صورت خودکار محاسبه نمی‌شود. "
@@ -400,10 +388,12 @@ def show_price_methods(chat_id):
 def price_method_description(method):
     descriptions = {
         "fixed": "قیمت نهایی کل کالا به تومان",
-        "below_board": "درصد تخفیف نسبت به قیمت تابلو",
+        "above_board_percent": "درصد افزایش نسبت به قیمت تابلو",
         "above_board": "مبلغ اضافه بر قیمت تابلو به تومان",
         "board": "بر اساس قیمت تابلو",
         "negotiable": "توافق با خریدار",
+        # سازگاری با آگهی‌ها و پیش‌نویس‌های قدیمی
+        "below_board": "درصد تخفیف نسبت به قیمت تابلو",
     }
 
     return descriptions.get(method, "ثبت نشده")
@@ -434,6 +424,10 @@ def price_display(listing):
     if method == "fixed":
         return f"{format_number(value)} تومان (قیمت ثابت)"
 
+    if method == "above_board_percent":
+        return f"{format_number(value)}٪ بالاتر از قیمت تابلو"
+
+    # فقط برای حفظ معنای آگهی‌های قدیمی
     if method == "below_board":
         return f"{format_number(value)}٪ زیر قیمت تابلو"
 
@@ -462,18 +456,18 @@ def ask_price_value(chat_id, user):
             "مثال: ۱۵۰۰۰۰۰۰"
         )
 
-    elif method == "below_board":
+    elif method == "above_board_percent":
         prompt = (
-            "📉 <b>درصد زیر قیمت تابلو</b>\n\n"
-            "چند درصد پایین‌تر از قیمت مرجع می‌فروشی؟\n"
-            "فقط عدد درصد را وارد کن.\n"
+            "📈 <b>درصد بالاتر از قیمت تابلو</b>\n\n"
+            "چند درصد بالاتر از قیمت مرجع می‌فروشی؟\n"
+            "فقط عدد درصد افزایش را وارد کن.\n"
             "مثال: ۲ یا ۲٫۵\n\n"
             "درصد باید بیشتر از صفر و کمتر از ۱۰۰ باشد."
         )
 
     elif method == "above_board":
         prompt = (
-            "📈 <b>مبلغ بالاتر از تابلو</b>\n\n"
+            "➕ <b>مبلغ بالاتر از تابلو</b>\n\n"
             "چه مبلغی به قیمت مرجع اضافه می‌کنی؟\n"
             "مبلغ اضافه را به تومان وارد کن.\n"
             "مثال: ۵۰۰۰۰۰"
@@ -671,6 +665,7 @@ def normalize_number(value):
     )
 
     value = str(value).translate(translation)
+    value = value.replace("٬", "")
     value = value.replace(",", ".").strip()
 
     return value
@@ -1035,7 +1030,6 @@ def start_listing_after_type(chat_id, user, product_type):
     draft["product_type_key"] = product_type
     draft["product_type"] = PRODUCT_TYPES[product_type]
 
-    # اطلاعات وابسته به نوع کالای قبلی پاک می‌شود.
     for key in (
         "coin_type_key",
         "coin_type",
@@ -1081,7 +1075,6 @@ def start_listing_after_coin(chat_id, user, coin_key):
 
     if coin_key == "parsian":
         draft["weight_unit"] = "سوت"
-
     else:
         draft["weight_unit"] = "گرم"
 
@@ -1325,7 +1318,6 @@ def start_edit_field(chat_id, user, field):
     draft["editing"] = True
 
     if field == "product":
-        # نوع کالا دوباره انتخاب می‌شود.
         draft.pop("product_type_key", None)
         draft.pop("product_type", None)
         draft.pop("coin_type_key", None)
@@ -1341,11 +1333,11 @@ def start_edit_field(chat_id, user, field):
 
     if field == "weight":
         if not requires_weight(draft):
-            answer = (
-                "برای این نوع سکه وزن جداگانه ثبت نمی‌شود."
-            )
             draft.pop("editing", None)
-            send_message(chat_id, answer)
+            send_message(
+                chat_id,
+                "برای این نوع سکه وزن جداگانه ثبت نمی‌شود.",
+            )
             show_preview(chat_id, user)
             return
 
@@ -1427,11 +1419,7 @@ def handle_message(state, message):
     user = get_user(state, user_id)
     is_admin = user_id == ADMIN_ID
 
-    # -----------------------------------------------------
-    # لغو
-    # -----------------------------------------------------
-
-    if text == "/cancel":
+    if "/cancel" == text:
         cancel_flow(user)
 
         send_message(
@@ -1455,10 +1443,7 @@ def handle_message(state, message):
         else ""
     )
 
-    # -----------------------------------------------------
     # شروع ربات
-    # -----------------------------------------------------
-
     if command == "/start":
         cancel_flow(user)
 
@@ -1476,10 +1461,7 @@ def handle_message(state, message):
         )
         return None
 
-    # -----------------------------------------------------
     # منوها
-    # -----------------------------------------------------
-
     if text == "📜 قوانین و مقررات":
         show_rules(chat_id)
         return None
@@ -1576,10 +1558,7 @@ def handle_message(state, message):
 
         return None
 
-    # -----------------------------------------------------
     # کنترل جریان
-    # -----------------------------------------------------
-
     flow = user.get("flow")
 
     if not flow:
@@ -1602,10 +1581,6 @@ def handle_message(state, message):
             main_keyboard(is_admin),
         )
         return None
-
-    # -----------------------------------------------------
-    # انتظار انتخاب نوع کالا
-    # -----------------------------------------------------
 
     if flow == "type":
         send_message(
@@ -1646,10 +1621,7 @@ def handle_message(state, message):
         )
         return None
 
-    # -----------------------------------------------------
     # توضیحات
-    # -----------------------------------------------------
-
     if flow == "description":
         if not text:
             send_message(
@@ -1662,10 +1634,7 @@ def handle_message(state, message):
         finish_edit_or_continue(chat_id, user)
         return None
 
-    # -----------------------------------------------------
     # وزن
-    # -----------------------------------------------------
-
     if flow == "weight":
         normalized = normalize_number(text)
 
@@ -1720,10 +1689,7 @@ def handle_message(state, message):
         finish_edit_or_continue(chat_id, user)
         return None
 
-    # -----------------------------------------------------
     # قیمت
-    # -----------------------------------------------------
-
     if flow == "price_value":
         normalized = normalize_number(text)
 
@@ -1744,7 +1710,9 @@ def handle_message(state, message):
 
         method = draft.get("price_method")
 
-        if method == "below_board":
+        # درصد افزایش نسبت به قیمت تابلو
+        # درصدهای قدیمی زیر تابلو فقط برای سازگاری با پیش‌نویس‌های قبلی
+        if method in ("above_board_percent", "below_board"):
             if value <= 0 or value >= 100:
                 send_message(
                     chat_id,
@@ -1778,10 +1746,7 @@ def handle_message(state, message):
         finish_edit_or_continue(chat_id, user)
         return None
 
-    # -----------------------------------------------------
     # ارتباط
-    # -----------------------------------------------------
-
     if flow == "contact":
         if not text:
             send_message(
@@ -1799,10 +1764,7 @@ def handle_message(state, message):
 
         return None
 
-    # -----------------------------------------------------
     # شهر
-    # -----------------------------------------------------
-
     if flow == "city":
         if not text:
             send_message(
@@ -1820,10 +1782,7 @@ def handle_message(state, message):
 
         return None
 
-    # -----------------------------------------------------
     # عکس
-    # -----------------------------------------------------
-
     if flow == "photo":
         photos = message.get("photo")
 
@@ -1875,10 +1834,7 @@ def handle_callback(state, callback, sha, update_id):
 
     user = get_user(state, user_id)
 
-    # -----------------------------------------------------
     # قوانین
-    # -----------------------------------------------------
-
     if data == "terms_accept":
         if chat_id is None:
             answer_callback(
@@ -1921,10 +1877,7 @@ def handle_callback(state, callback, sha, update_id):
 
         return sha
 
-    # -----------------------------------------------------
     # انتخاب نوع کالا
-    # -----------------------------------------------------
-
     if data.startswith("type:"):
         product_type = data.split(":", 1)[1]
 
@@ -1961,10 +1914,7 @@ def handle_callback(state, callback, sha, update_id):
 
         return sha
 
-    # -----------------------------------------------------
     # انتخاب سکه
-    # -----------------------------------------------------
-
     if data.startswith("coin:"):
         coin_key = data.split(":", 1)[1]
 
@@ -2001,10 +1951,7 @@ def handle_callback(state, callback, sha, update_id):
 
         return sha
 
-    # -----------------------------------------------------
     # انتخاب عیار
-    # -----------------------------------------------------
-
     if data.startswith("purity:"):
         purity_key = data.split(":", 1)[1]
 
@@ -2044,10 +1991,7 @@ def handle_callback(state, callback, sha, update_id):
 
         return sha
 
-    # -----------------------------------------------------
     # انتخاب روش قیمت‌گذاری
-    # -----------------------------------------------------
-
     if data.startswith("price_method:"):
         method = data.split(":", 1)[1]
 
@@ -2097,10 +2041,7 @@ def handle_callback(state, callback, sha, update_id):
 
         return sha
 
-    # -----------------------------------------------------
     # حذف توضیحات یا عکس
-    # -----------------------------------------------------
-
     if data == "skip:description":
         if (
             chat_id is None
@@ -2157,10 +2098,7 @@ def handle_callback(state, callback, sha, update_id):
 
         return sha
 
-    # -----------------------------------------------------
     # اصلاح اطلاعات پیش‌نویس
-    # -----------------------------------------------------
-
     if data.startswith("edit:"):
         if chat_id is None or not user.get("draft"):
             answer_callback(
@@ -2211,10 +2149,7 @@ def handle_callback(state, callback, sha, update_id):
 
         return sha
 
-    # -----------------------------------------------------
     # تأیید نهایی پیش‌نویس
-    # -----------------------------------------------------
-
     if data == "preview:confirm":
         if (
             chat_id is None
@@ -2245,7 +2180,13 @@ def handle_callback(state, callback, sha, update_id):
 
         if (
             draft.get("price_method")
-            in ("fixed", "below_board", "above_board")
+            in (
+                "fixed",
+                "above_board_percent",
+                "above_board",
+                # سازگاری با پیش‌نویس‌های قدیمی
+                "below_board",
+            )
             and not draft.get("price_value")
         ):
             answer_callback(
@@ -2287,10 +2228,7 @@ def handle_callback(state, callback, sha, update_id):
 
         return sha
 
-    # -----------------------------------------------------
-    # از اینجا به بعد عملیات فقط مخصوص مدیر است
-    # -----------------------------------------------------
-
+    # عملیات مدیریتی
     if user_id != ADMIN_ID:
         answer_callback(
             callback_id,
@@ -2327,10 +2265,7 @@ def handle_callback(state, callback, sha, update_id):
         )
         return sha
 
-    # -----------------------------------------------------
     # فروش‌رفته
-    # -----------------------------------------------------
-
     if action == "sold":
         if listing.get("status") == "sold":
             answer_callback(
@@ -2363,10 +2298,7 @@ def handle_callback(state, callback, sha, update_id):
 
         return sha
 
-    # -----------------------------------------------------
     # جلوگیری از بررسی مجدد
-    # -----------------------------------------------------
-
     if listing.get("status") != "pending":
         answer_callback(
             callback_id,
@@ -2375,10 +2307,7 @@ def handle_callback(state, callback, sha, update_id):
         )
         return sha
 
-    # -----------------------------------------------------
     # تأیید آگهی کاربر
-    # -----------------------------------------------------
-
     if action == "approve":
         listing.setdefault("weight", "ثبت نشده")
         listing.setdefault("city", "ثبت نشده")
@@ -2394,10 +2323,7 @@ def handle_callback(state, callback, sha, update_id):
 
         return sha
 
-    # -----------------------------------------------------
     # رد آگهی کاربر
-    # -----------------------------------------------------
-
     if action == "reject":
         listing["status"] = "rejected"
 
@@ -2440,7 +2366,6 @@ def process_pending_publications(state, sha):
         if listing.get("status") != "publishing":
             continue
 
-        # اگر اطلاعات پیام‌های منتشرشده موجود است، دوباره ارسال نکن.
         if listing.get("published_messages"):
             listing["status"] = "published"
             changed = True
@@ -2561,7 +2486,6 @@ class handler(BaseHTTPRequestHandler):
             state, sha = load_state()
             update_id = int(update["update_id"])
 
-            # ابتدا وضعیت‌های نیمه‌تمام انتشار بررسی می‌شوند.
             sha = process_pending_publications(
                 state,
                 sha,
@@ -2587,7 +2511,6 @@ class handler(BaseHTTPRequestHandler):
                 state["last_update_id"] = update_id
                 sha = save_state(state, sha)
 
-                # انتشار فقط بعد از ذخیره تغییر وضعیت انجام می‌شود.
                 sha = process_pending_publications(
                     state,
                     sha,
@@ -2605,7 +2528,6 @@ class handler(BaseHTTPRequestHandler):
             state["last_update_id"] = update_id
             sha = save_state(state, sha)
 
-            # محصول مدیر و آگهی‌های تأییدشده در این مرحله منتشر می‌شوند.
             sha = process_pending_publications(
                 state,
                 sha,
