@@ -1,3 +1,4 @@
+
 import base64
 import json
 import os
@@ -49,24 +50,32 @@ MAX_ATTEMPTS = 4
 
 def send_json(handler, status, data):
     body = json.dumps(
-        data, ensure_ascii=False
+        data,
+        ensure_ascii=False
     ).encode("utf-8")
 
     handler.send_response(status)
     handler.send_header(
-        "Content-Type", "application/json; charset=utf-8"
+        "Content-Type",
+        "application/json; charset=utf-8"
     )
     handler.send_header("Cache-Control", "no-store")
     handler.send_header(
-        "Access-Control-Allow-Origin", "*"
+        "Access-Control-Allow-Origin",
+        "*"
     )
     handler.send_header(
-        "Access-Control-Allow-Methods", "GET, POST, OPTIONS"
+        "Access-Control-Allow-Methods",
+        "GET, POST, OPTIONS"
     )
     handler.send_header(
-        "Access-Control-Allow-Headers", "Content-Type"
+        "Access-Control-Allow-Headers",
+        "Content-Type"
     )
-    handler.send_header("Content-Length", str(len(body)))
+    handler.send_header(
+        "Content-Length",
+        str(len(body))
+    )
     handler.end_headers()
 
     if status != 204:
@@ -79,9 +88,14 @@ def send_json(handler, status, data):
 
 def load_state():
     if not GITHUB_TOKEN:
-        raise RuntimeError("SELLER_DATA_TOKEN تنظیم نشده است.")
+        raise RuntimeError(
+            "SELLER_DATA_TOKEN تنظیم نشده است."
+        )
 
-    response = SESSION.get(GITHUB_API, timeout=20)
+    response = SESSION.get(
+        GITHUB_API,
+        timeout=20
+    )
 
     if response.status_code == 404:
         return {
@@ -92,13 +106,16 @@ def load_state():
         }, None
 
     response.raise_for_status()
+
     item = response.json()
 
     raw = base64.b64decode(item["content"])
     state = json.loads(raw.decode("utf-8"))
 
     if not isinstance(state, dict):
-        raise ValueError("ساختار state.json معتبر نیست.")
+        raise ValueError(
+            "ساختار state.json معتبر نیست."
+        )
 
     state.setdefault("last_update_id", -1)
     state.setdefault("users", {})
@@ -106,9 +123,12 @@ def load_state():
     state.setdefault("next_id", 1)
 
     if not isinstance(state["listings"], list):
-        raise ValueError("فهرست آگهی‌ها معتبر نیست.")
+        raise ValueError(
+            "فهرست آگهی‌ها معتبر نیست."
+        )
 
     ids = []
+
     for listing in state["listings"]:
         try:
             ids.append(int(listing.get("id", 0)))
@@ -117,7 +137,8 @@ def load_state():
 
     if ids:
         state["next_id"] = max(
-            int(state["next_id"]), max(ids) + 1
+            int(state["next_id"]),
+            max(ids) + 1
         )
 
     return state, item["sha"]
@@ -128,7 +149,7 @@ def save_state(state, sha):
         json.dumps(
             state,
             ensure_ascii=False,
-            indent=2,
+            indent=2
         ).encode("utf-8")
     ).decode("ascii")
 
@@ -143,18 +164,19 @@ def save_state(state, sha):
     response = SESSION.put(
         GITHUB_API,
         json=payload,
-        timeout=20,
+        timeout=20
     )
+
     response.raise_for_status()
+
     return response.json()
 
 
 def append_listing(listing):
     """
     تلاش مجدد برای کاهش خطای SHA در GitHub.
-    چون ربات و API از یک state.json استفاده می‌کنند،
-    ممکن است دو درخواست هم‌زمان با هم تداخل داشته باشند.
     """
+
     for attempt in range(MAX_ATTEMPTS):
         state, sha = load_state()
 
@@ -163,32 +185,42 @@ def append_listing(listing):
                 item for item in state["listings"]
                 if str(item.get("id")) == str(listing["id"])
             ),
-            None,
+            None
         )
 
         if existing:
             return existing
 
         state["listings"].append(listing)
+
         state["next_id"] = max(
             int(state.get("next_id", 1)),
-            int(listing["id"]) + 1,
+            int(listing["id"]) + 1
         )
 
         try:
             save_state(state, sha)
             return listing
+
         except requests.HTTPError as exc:
             status = (
                 exc.response.status_code
-                if exc.response is not None else None
+                if exc.response is not None
+                else None
             )
-            if status in (409, 422) and attempt < MAX_ATTEMPTS - 1:
+
+            if (
+                status in (409, 422)
+                and attempt < MAX_ATTEMPTS - 1
+            ):
                 time.sleep(0.5 * (attempt + 1))
                 continue
+
             raise
 
-    raise RuntimeError("ذخیره آگهی ناموفق بود.")
+    raise RuntimeError(
+        "ذخیره آگهی ناموفق بود."
+    )
 
 
 # =========================================================
@@ -198,6 +230,7 @@ def append_listing(listing):
 def clean_text(value, limit=MAX_TEXT_LENGTH):
     if not isinstance(value, str):
         return ""
+
     return value.strip()[:limit]
 
 
@@ -208,6 +241,7 @@ def valid_phone(value):
 
 def escape_html(value):
     value = str(value or "")
+
     return (
         value.replace("&", "&amp;")
         .replace("<", "&lt;")
@@ -218,21 +252,30 @@ def escape_html(value):
 
 def telegram_call(method, data=None, files=None):
     if not TELEGRAM_TOKEN:
-        raise RuntimeError("TELEGRAM_BOT_TOKEN تنظیم نشده است.")
+        raise RuntimeError(
+            "TELEGRAM_BOT_TOKEN تنظیم نشده است."
+        )
 
     response = requests.post(
         f"{TG_API}/{method}",
         data=data,
         files=files,
-        timeout=60,
+        timeout=60
     )
+
     response.raise_for_status()
 
     result = response.json()
+
     if not result.get("ok"):
         raise RuntimeError(
             "درخواست تلگرام ناموفق بود: "
-            + str(result.get("description", "خطای نامشخص"))
+            + str(
+                result.get(
+                    "description",
+                    "خطای نامشخص"
+                )
+            )
         )
 
     return result["result"]
@@ -243,38 +286,112 @@ def telegram_call(method, data=None, files=None):
 # =========================================================
 
 def parse_request(handler):
-    content_type = handler.headers.get("Content-Type", "")
-    raw_length = handler.headers.get("Content-Length", "0").strip()
 
-    if not raw_length.isdigit():
-        raise ValueError("حجم درخواست نامعتبر است؛ لطفاً دوباره تلاش کنید.")
+    content_type = handler.headers.get(
+        "Content-Type",
+        ""
+    )
 
-    length = int(raw_length)
+    length_values = (
+        handler.headers.get_all("Content-Length") or []
+    )
+
+    # اطلاعات تشخیصی برای Vercel Logs
+    print(
+        "REQUEST CONTENT-LENGTH:",
+        repr(length_values)
+    )
+
+    print(
+        "REQUEST CONTENT-TYPE:",
+        repr(content_type)
+    )
+
+    print(
+        "REQUEST TRANSFER-ENCODING:",
+        repr(handler.headers.get("Transfer-Encoding"))
+    )
+
+    # بررسی Content-Length
+    if not length_values:
+        raise ValueError(
+            "سرور طول درخواست را دریافت نکرده است."
+        )
+
+    parsed_lengths = []
+
+    for value in length_values:
+
+        for part in value.split(","):
+
+            part = part.strip()
+
+            if not part.isdigit():
+                raise ValueError(
+                    "مقدار طول درخواست در سرور معتبر نیست."
+                )
+
+            parsed_lengths.append(int(part))
+
+    if (
+        not parsed_lengths
+        or len(set(parsed_lengths)) != 1
+    ):
+        raise ValueError(
+            "مقادیر طول درخواست با یکدیگر مطابقت ندارند."
+        )
+
+    length = parsed_lengths[0]
+
     if length <= 0:
-        raise ValueError("اطلاعات فرم دریافت نشد.")
+        raise ValueError(
+            "اطلاعات فرم دریافت نشد."
+        )
 
     if length > MAX_BODY_SIZE:
-        raise ValueError("حجم کل درخواست بیشتر از ۴ مگابایت است.")
+        raise ValueError(
+            "حجم کل درخواست بیشتر از ۴ مگابایت است."
+        )
 
+    # خواندن بدنه درخواست
     raw = handler.rfile.read(length)
 
-    if "multipart/form-data" in content_type.lower():
-        message = BytesParser(policy=policy.default).parsebytes(
-            (
-                f"Content-Type: {content_type}\r\n"
-                "MIME-Version: 1.0\r\n\r\n"
-            ).encode("ascii") + raw
+    if len(raw) != length:
+        raise ValueError(
+            "دریافت اطلاعات فرم ناقص انجام شد."
         )
+
+    # پردازش multipart
+    if "multipart/form-data" in content_type.lower():
+
+        try:
+            message = BytesParser(
+                policy=policy.default
+            ).parsebytes(
+                (
+                    f"Content-Type: {content_type}\r\n"
+                    "MIME-Version: 1.0\r\n\r\n"
+                ).encode("ascii") + raw
+            )
+
+        except Exception:
+            raise ValueError(
+                "ساختار اطلاعات و فایل‌های ارسالی معتبر نیست."
+            )
 
         fields = {}
         uploads = {}
 
         if not message.is_multipart():
-            raise ValueError("ساختار فایل‌های ارسالی معتبر نیست.")
+            raise ValueError(
+                "ساختار فایل‌های ارسالی معتبر نیست."
+            )
 
         for part in message.iter_parts():
+
             name = part.get_param(
-                "name", header="content-disposition"
+                "name",
+                header="content-disposition"
             )
 
             if not name:
@@ -283,7 +400,11 @@ def parse_request(handler):
             filename = part.get_filename()
 
             if filename:
-                content = part.get_payload(decode=True) or b""
+
+                content = (
+                    part.get_payload(decode=True) or b""
+                )
+
                 uploads[name] = {
                     "filename": os.path.basename(filename),
                     "content_type": (
@@ -292,33 +413,73 @@ def parse_request(handler):
                     ),
                     "content": content,
                 }
+
             else:
-                content = part.get_payload(decode=True) or b""
-                charset = part.get_content_charset() or "utf-8"
+
+                content = (
+                    part.get_payload(decode=True) or b""
+                )
+
+                charset = (
+                    part.get_content_charset()
+                    or "utf-8"
+                )
+
                 fields[name] = content.decode(
-                    charset, errors="replace"
+                    charset,
+                    errors="replace"
                 ).strip()
+
+        print(
+            "REQUEST FIELDS:",
+            list(fields.keys())
+        )
+
+        print(
+            "REQUEST UPLOADS:",
+            {
+                key: len(value["content"])
+                for key, value in uploads.items()
+            }
+        )
 
         return fields, uploads
 
+    # پردازش JSON
     if "application/json" in content_type.lower():
-        data = json.loads(raw.decode("utf-8"))
+
+        data = json.loads(
+            raw.decode("utf-8")
+        )
+
         if not isinstance(data, dict):
-            raise ValueError("ساختار اطلاعات فرم معتبر نیست.")
+            raise ValueError(
+                "ساختار اطلاعات فرم معتبر نیست."
+            )
+
         return data, {}
 
-    raise ValueError("نوع درخواست پشتیبانی نمی‌شود.")
+    raise ValueError(
+        "نوع درخواست پشتیبانی نمی‌شود."
+    )
 
 
 def validate_upload(upload, allowed_types, label):
+
     if not upload or not upload.get("content"):
-        raise ValueError(f"ارسال {label} الزامی است.")
+        raise ValueError(
+            f"ارسال {label} الزامی است."
+        )
 
     if len(upload["content"]) > MAX_FILE_SIZE:
-        raise ValueError(f"حجم {label} باید حداکثر ۱٫۵ مگابایت باشد.")
+        raise ValueError(
+            f"حجم {label} باید حداکثر ۱٫۵ مگابایت باشد."
+        )
 
     if upload["content_type"] not in allowed_types:
-        raise ValueError(f"فرمت {label} مجاز نیست.")
+        raise ValueError(
+            f"فرمت {label} مجاز نیست."
+        )
 
     return upload
 
@@ -340,88 +501,195 @@ JEWELRY_MAP = {
 }
 
 COIN_MAP = {
-    "تمام سکه امامی": ("emami", "سکه تمام امامی"),
-    "تمام سکه بهار آزادی": ("bahar_azadi", "سکه تمام بهار آزادی"),
-    "نیم سکه": ("half", "نیم‌سکه"),
-    "ربع سکه": ("quarter", "ربع‌سکه"),
-    "سکه یک گرمی بانک مرکزی": ("gram", "سکه یک گرمی بانک مرکزی"),
-    "سایر سکه‌ها": ("other_coin", "سایر سکه‌ها"),
+    "تمام سکه امامی": (
+        "emami",
+        "سکه تمام امامی"
+    ),
+    "تمام سکه بهار آزادی": (
+        "bahar_azadi",
+        "سکه تمام بهار آزادی"
+    ),
+    "نیم سکه": (
+        "half",
+        "نیم‌سکه"
+    ),
+    "ربع سکه": (
+        "quarter",
+        "ربع‌سکه"
+    ),
+    "سکه یک گرمی بانک مرکزی": (
+        "gram",
+        "سکه یک گرمی بانک مرکزی"
+    ),
+    "سایر سکه‌ها": (
+        "other_coin",
+        "سایر سکه‌ها"
+    ),
 }
 
 
 def normalize_listing(data, listing_id, photo_file_id):
-    name = clean_text(data.get("sellerName") or data.get("name"), 100)
-    phone = clean_text(data.get("sellerPhone") or data.get("phone"), 30)
-    category = clean_text(
-        data.get("sellerItem") or data.get("product_type"), 100
-    )
-    city = clean_text(data.get("city") or "ثبت نشده", 100)
-    description = clean_text(
-        data.get("sellerDescription") or data.get("description"), 1000
-    )
-    weight = clean_text(
-        data.get("sellerWeight") or data.get("weight"), 40
-    )
-    karat = clean_text(data.get("sellerKarat") or data.get("karat"), 50)
-    method = clean_text(
-        data.get("pricingMethod") or data.get("pricing_method"), 50
+
+    name = clean_text(
+        data.get("sellerName") or data.get("name"),
+        100
     )
 
-    if not all([name, phone, category, description]):
+    phone = clean_text(
+        data.get("sellerPhone") or data.get("phone"),
+        30
+    )
+
+    category = clean_text(
+        data.get("sellerItem") or data.get("product_type"),
+        100
+    )
+
+    city = clean_text(
+        data.get("city") or "ثبت نشده",
+        100
+    )
+
+    description = clean_text(
+        data.get("sellerDescription") or data.get("description"),
+        1000
+    )
+
+    weight = clean_text(
+        data.get("sellerWeight") or data.get("weight"),
+        40
+    )
+
+    karat = clean_text(
+        data.get("sellerKarat") or data.get("karat"),
+        50
+    )
+
+    method = clean_text(
+        data.get("pricingMethod") or data.get("pricing_method"),
+        50
+    )
+
+    if not all([
+        name,
+        phone,
+        category,
+        description
+    ]):
         raise ValueError(
             "نام، شماره تماس، دسته‌بندی و توضیحات الزامی هستند."
         )
 
     if not valid_phone(phone):
-        raise ValueError("شماره تماس واردشده معتبر نیست.")
+        raise ValueError(
+            "شماره تماس واردشده معتبر نیست."
+        )
 
     if data.get("invoiceConfirm") not in (
-        "on", "true", "1", "yes", "بله"
+        "on",
+        "true",
+        "1",
+        "yes",
+        "بله"
     ):
-        raise ValueError("تأیید داشتن فاکتور معتبر الزامی است.")
+        raise ValueError(
+            "تأیید داشتن فاکتور معتبر الزامی است."
+        )
 
+    # زیورآلات
     if category == "jewelry":
-        subtype = clean_text(data.get("jewelryType"), 100)
+
+        subtype = clean_text(
+            data.get("jewelryType"),
+            100
+        )
+
         if not subtype:
-            raise ValueError("نوع زیورآلات را انتخاب کنید.")
-        product_type_key = JEWELRY_MAP.get(subtype, "other")
+            raise ValueError(
+                "نوع زیورآلات را انتخاب کنید."
+            )
+
+        product_type_key = JEWELRY_MAP.get(
+            subtype,
+            "other"
+        )
+
         product_type = subtype
         title = subtype
         weight_unit = "گرم"
 
+    # سکه
     elif category == "coin":
-        subtype = clean_text(data.get("coinType"), 100)
+
+        subtype = clean_text(
+            data.get("coinType"),
+            100
+        )
+
         if subtype not in COIN_MAP:
-            raise ValueError("نوع سکه را به‌درستی انتخاب کنید.")
+            raise ValueError(
+                "نوع سکه را به‌درستی انتخاب کنید."
+            )
+
         product_type_key, product_type = COIN_MAP[subtype]
+
         title = product_type
         weight_unit = "گرم"
 
+    # سکه پارسیان
     elif category == "parsian":
+
         product_type_key = "coin"
         product_type = "سکه پارسیان"
         title = "سکه پارسیان"
-        parsian_weight = clean_text(data.get("parsianWeight"), 30)
-        if not parsian_weight or not parsian_weight.isdigit():
-            raise ValueError("وزن سکه پارسیان را برحسب سوت وارد کنید.")
+
+        parsian_weight = clean_text(
+            data.get("parsianWeight"),
+            30
+        )
+
+        if (
+            not parsian_weight
+            or not parsian_weight.isdigit()
+        ):
+            raise ValueError(
+                "وزن سکه پارسیان را برحسب سوت وارد کنید."
+            )
+
         weight = parsian_weight
         weight_unit = "سوت"
 
+    # طلای آب‌شده
     elif category == "melted":
+
         product_type_key = "melted_gold"
         product_type = "طلای آب‌شده"
         title = "طلای آب‌شده"
         weight_unit = "گرم"
 
     else:
-        raise ValueError("دسته‌بندی انتخاب‌شده معتبر نیست.")
+        raise ValueError(
+            "دسته‌بندی انتخاب‌شده معتبر نیست."
+        )
 
     if not weight:
         weight = "ثبت نشده"
 
-    fixed_price = clean_text(data.get("fixedPrice"), 50)
-    percent = clean_text(data.get("pricePercent"), 30)
-    amount = clean_text(data.get("priceAmount"), 50)
+    # اطلاعات قیمت
+    fixed_price = clean_text(
+        data.get("fixedPrice"),
+        50
+    )
+
+    percent = clean_text(
+        data.get("pricePercent"),
+        30
+    )
+
+    amount = clean_text(
+        data.get("priceAmount"),
+        50
+    )
 
     price_method_map = {
         "fixed": "fixed",
@@ -431,34 +699,56 @@ def normalize_listing(data, listing_id, photo_file_id):
     }
 
     if method not in price_method_map:
-        raise ValueError("روش قیمت‌گذاری را انتخاب کنید.")
+        raise ValueError(
+            "روش قیمت‌گذاری را انتخاب کنید."
+        )
 
     price_method = price_method_map[method]
 
     if method == "fixed":
-        if not fixed_price.isdigit() or int(fixed_price) <= 0:
-            raise ValueError("قیمت ثابت معتبر وارد کنید.")
+
+        if (
+            not fixed_price.isdigit()
+            or int(fixed_price) <= 0
+        ):
+            raise ValueError(
+                "قیمت ثابت معتبر وارد کنید."
+            )
+
         price_value = fixed_price
         price = fixed_price + " تومان"
 
     elif method == "percent":
+
         if not percent:
-            raise ValueError("درصد بالاتر از قیمت تابلو را وارد کنید.")
+            raise ValueError(
+                "درصد بالاتر از قیمت تابلو را وارد کنید."
+            )
+
         try:
             if float(percent) < 0:
                 raise ValueError()
+
         except ValueError:
-            raise ValueError("درصد قیمت‌گذاری معتبر نیست.")
+            raise ValueError(
+                "درصد قیمت‌گذاری معتبر نیست."
+            )
+
         price_value = percent
         price = percent + " درصد بالاتر از تابلو"
 
     elif method == "amount":
+
         if not amount.isdigit():
-            raise ValueError("مبلغ بالاتر از قیمت تابلو را وارد کنید.")
+            raise ValueError(
+                "مبلغ بالاتر از قیمت تابلو را وارد کنید."
+            )
+
         price_value = amount
         price = amount + " تومان بالاتر از تابلو"
 
     else:
+
         price_value = ""
         price = "توافقی"
 
@@ -467,33 +757,50 @@ def normalize_listing(data, listing_id, photo_file_id):
         "source": "website",
         "owner_id": ADMIN_ID,
         "kind": "user",
+
         "seller_name": name,
         "contact": phone,
+
         "product_type_key": product_type_key,
         "product_type": product_type,
         "item_type": product_type,
+
         "coin_type_key": (
-            product_type_key if category == "coin" else ""
+            product_type_key
+            if category == "coin"
+            else ""
         ),
+
         "coin_type": (
-            product_type if category == "coin" else ""
+            product_type
+            if category == "coin"
+            else ""
         ),
+
         "purity_key": karat,
         "purity": karat,
         "karat": karat,
+
         "weight": weight,
         "weight_unit": weight_unit,
+
         "title": title,
         "description": description,
+
         "price_method": price_method,
         "price_value": price_value,
         "pricing_method": method,
         "price": price,
+
         "photo": photo_file_id,
         "photo_url": None,
+
         "city": city,
         "status": "pending",
-        "created_at": datetime.now(timezone.utc).isoformat(),
+
+        "created_at": datetime.now(
+            timezone.utc
+        ).isoformat(),
     }
 
 
@@ -502,11 +809,14 @@ def normalize_listing(data, listing_id, photo_file_id):
 # =========================================================
 
 def send_product_photo(upload):
+
     return telegram_call(
         "sendPhoto",
         data={
             "chat_id": str(ADMIN_ID),
-            "caption": "📷 عکس محصول آگهی جدید سایت زرین ماه",
+            "caption": (
+                "📷 عکس محصول آگهی جدید سایت زرین ماه"
+            ),
         },
         files={
             "photo": (
@@ -519,6 +829,7 @@ def send_product_photo(upload):
 
 
 def send_invoice(upload, listing_id):
+
     return telegram_call(
         "sendDocument",
         data={
@@ -539,22 +850,43 @@ def send_invoice(upload, listing_id):
 
 
 def notify_admin(listing):
+
     listing_id = listing["id"]
 
     message = (
         "🆕 <b>آگهی جدید از سایت زرین ماه</b>\n\n"
-        f"🆔 شماره آگهی: <code>{listing_id}</code>\n"
-        f"👤 فروشنده: {escape_html(listing['seller_name'])}\n"
-        f"📞 تماس: {escape_html(listing['contact'])}\n"
-        f"📦 نوع کالا: {escape_html(listing['product_type'])}\n"
-        f"⚖️ وزن: {escape_html(listing['weight'])} "
+
+        f"🆔 شماره آگهی: "
+        f"<code>{listing_id}</code>\n"
+
+        f"👤 فروشنده: "
+        f"{escape_html(listing['seller_name'])}\n"
+
+        f"📞 تماس: "
+        f"{escape_html(listing['contact'])}\n"
+
+        f"📦 نوع کالا: "
+        f"{escape_html(listing['product_type'])}\n"
+
+        f"⚖️ وزن: "
+        f"{escape_html(listing['weight'])} "
         f"{escape_html(listing['weight_unit'])}\n"
-        f"🔎 عیار: {escape_html(listing.get('karat') or 'ثبت نشده')}\n"
-        f"📍 شهر: {escape_html(listing['city'])}\n"
+
+        f"🔎 عیار: "
+        f"{escape_html(listing.get('karat') or 'ثبت نشده')}\n"
+
+        f"📍 شهر: "
+        f"{escape_html(listing['city'])}\n"
+
         f"💰 روش قیمت‌گذاری: "
         f"{escape_html(listing['pricing_method'])}\n"
-        f"💵 قیمت پیشنهادی: {escape_html(listing['price'])}\n\n"
-        f"📝 توضیحات:\n{escape_html(listing['description'])}\n\n"
+
+        f"💵 قیمت پیشنهادی: "
+        f"{escape_html(listing['price'])}\n\n"
+
+        f"📝 توضیحات:\n"
+        f"{escape_html(listing['description'])}\n\n"
+
         "🧾 فاکتور باید بررسی شود.\n"
         "⚠️ آگهی تا تأیید مدیر منتشر نمی‌شود."
     )
@@ -578,7 +910,10 @@ def notify_admin(listing):
             "chat_id": str(ADMIN_ID),
             "text": message,
             "parse_mode": "HTML",
-            "reply_markup": json.dumps(keyboard, ensure_ascii=False),
+            "reply_markup": json.dumps(
+                keyboard,
+                ensure_ascii=False
+            ),
         },
     )
 
@@ -588,59 +923,104 @@ def notify_admin(listing):
 # =========================================================
 
 def create_listing(data, uploads):
+
     photo = validate_upload(
-        uploads.get("sellerPhoto") or uploads.get("photo"),
-        {"image/jpeg", "image/png", "image/webp"},
+        uploads.get("sellerPhoto")
+        or uploads.get("photo"),
+
+        {
+            "image/jpeg",
+            "image/png",
+            "image/webp"
+        },
+
         "عکس محصول",
     )
 
     invoice = validate_upload(
-        uploads.get("sellerInvoice") or uploads.get("invoice"),
+        uploads.get("sellerInvoice")
+        or uploads.get("invoice"),
+
         {
             "image/jpeg",
             "image/png",
             "image/webp",
             "application/pdf",
         },
+
         "فاکتور فروش",
     )
 
+    # ارسال عکس محصول به مدیر
     photo_message = send_product_photo(photo)
+
     photos = photo_message.get("photo") or []
 
     if not photos:
-        raise RuntimeError("تلگرام file_id عکس محصول را برنگرداند.")
+        raise RuntimeError(
+            "تلگرام file_id عکس محصول را برنگرداند."
+        )
 
     photo_file_id = photos[-1]["file_id"]
 
+    # دریافت شناسه آگهی
     state, _ = load_state()
-    listing_id = int(state.get("next_id", 1))
 
-    listing = normalize_listing(data, listing_id, photo_file_id)
+    listing_id = int(
+        state.get("next_id", 1)
+    )
 
+    # تبدیل اطلاعات فرم
+    listing = normalize_listing(
+        data,
+        listing_id,
+        photo_file_id
+    )
+
+    # ذخیره آگهی
     append_listing(listing)
 
+    # ارسال فاکتور
     invoice_sent = False
     invoice_error = False
 
     try:
-        send_invoice(invoice, listing_id)
+        send_invoice(
+            invoice,
+            listing_id
+        )
+
         invoice_sent = True
-    except Exception:
+
+    except Exception as exc:
+        print(
+            "INVOICE SEND ERROR:",
+            repr(exc)
+        )
+
         invoice_error = True
 
+    # اطلاع‌رسانی به مدیر
     try:
         notify_admin(listing)
         notified = True
-    except Exception:
+
+    except Exception as exc:
+        print(
+            "ADMIN NOTIFICATION ERROR:",
+            repr(exc)
+        )
+
         notified = False
 
     return {
         "id": listing_id,
         "status": "pending",
+
         "admin_notification_sent": notified,
         "invoice_sent": invoice_sent,
         "invoice_send_error": invoice_error,
+
         "message": (
             "آگهی ذخیره شد و در انتظار تأیید مدیر است."
             if notified and invoice_sent
@@ -656,6 +1036,7 @@ def create_listing(data, uploads):
 # =========================================================
 
 def public_listing(item):
+
     allowed = (
         "id",
         "product_type",
@@ -679,6 +1060,7 @@ def public_listing(item):
     }
 
     result["status"] = "published"
+
     return result
 
 
@@ -692,6 +1074,7 @@ class handler(BaseHTTPRequestHandler):
         send_json(self, 204, {})
 
     def do_GET(self):
+
         try:
             state, _ = load_state()
 
@@ -701,48 +1084,107 @@ class handler(BaseHTTPRequestHandler):
                 if item.get("status") == "published"
             ]
 
-            send_json(self, 200, {
-                "ok": True,
-                "listings": published,
-            })
+            send_json(
+                self,
+                200,
+                {
+                    "ok": True,
+                    "listings": published,
+                }
+            )
 
-        except Exception:
-            send_json(self, 500, {
-                "ok": False,
-                "error": "خواندن آگهی‌ها ناموفق بود.",
-            })
+        except Exception as exc:
+
+            print(
+                "GET ERROR:",
+                repr(exc)
+            )
+
+            send_json(
+                self,
+                500,
+                {
+                    "ok": False,
+                    "error": "خواندن آگهی‌ها ناموفق بود.",
+                }
+            )
 
     def do_POST(self):
+
         try:
+
             data, uploads = parse_request(self)
-            result = create_listing(data, uploads)
+
+            result = create_listing(
+                data,
+                uploads
+            )
 
             send_json(
                 self,
                 201 if result["admin_notification_sent"] else 202,
-                {"ok": True, **result},
+                {
+                    "ok": True,
+                    **result
+                }
             )
 
-        except (UnicodeDecodeError, json.JSONDecodeError):
-            send_json(self, 400, {
-                "ok": False,
-                "error": "اطلاعات ارسالی معتبر نیست.",
-            })
+        except (
+            UnicodeDecodeError,
+            json.JSONDecodeError
+        ) as exc:
+
+            print(
+                "REQUEST DECODE ERROR:",
+                repr(exc)
+            )
+
+            send_json(
+                self,
+                400,
+                {
+                    "ok": False,
+                    "error": "اطلاعات ارسالی معتبر نیست.",
+                }
+            )
 
         except ValueError as exc:
-            send_json(self, 400, {
-                "ok": False,
-                "error": str(exc),
-            })
 
-        except Exception:
-            send_json(self, 500, {
-                "ok": False,
-                "error": (
-                    "ثبت آگهی با خطا مواجه شد. "
-                    "توکن‌های سرور، دسترسی ربات و مخزن داده را بررسی کنید."
-                ),
-            })
+            print(
+                "VALIDATION ERROR:",
+                repr(exc)
+            )
+
+            send_json(
+                self,
+                400,
+                {
+                    "ok": False,
+                    "error": str(exc),
+                }
+            )
+
+        except Exception as exc:
+
+            print(
+                "POST ERROR:",
+                repr(exc)
+            )
+
+            send_json(
+                self,
+                500,
+                {
+                    "ok": False,
+                    "error": (
+                        "ثبت آگهی با خطا مواجه شد. "
+                        "توکن‌های سرور، دسترسی ربات و مخزن داده را بررسی کنید."
+                    ),
+                }
+            )
 
     def log_message(self, format, *args):
-        return
+        print(
+            "HTTP LOG:",
+            format % args
+        )
