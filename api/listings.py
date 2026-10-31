@@ -1,6 +1,7 @@
 
 import base64
 import json
+import mimetypes
 import os
 import re
 import time
@@ -8,6 +9,7 @@ from datetime import datetime, timezone
 from email import policy
 from email.parser import BytesParser
 from http.server import BaseHTTPRequestHandler
+from urllib.parse import urlsplit, parse_qs
 
 import requests
 
@@ -31,6 +33,11 @@ GITHUB_API = (
 
 TG_API = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
 
+# آدرس عمومی API ربات
+PUBLIC_API_URL = (
+    "https://zarinmah-seller-bot.vercel.app/api/listings"
+)
+
 SESSION = requests.Session()
 SESSION.headers.update({
     "Accept": "application/vnd.github+json",
@@ -49,37 +56,74 @@ MAX_ATTEMPTS = 4
 # =========================================================
 
 def send_json(handler, status, data):
+
     body = json.dumps(
         data,
         ensure_ascii=False
     ).encode("utf-8")
 
     handler.send_response(status)
+
     handler.send_header(
         "Content-Type",
         "application/json; charset=utf-8"
     )
+
     handler.send_header("Cache-Control", "no-store")
+
     handler.send_header(
         "Access-Control-Allow-Origin",
         "*"
     )
+
     handler.send_header(
         "Access-Control-Allow-Methods",
         "GET, POST, OPTIONS"
     )
+
     handler.send_header(
         "Access-Control-Allow-Headers",
         "Content-Type"
     )
+
     handler.send_header(
         "Content-Length",
         str(len(body))
     )
+
     handler.end_headers()
 
     if status != 204:
         handler.wfile.write(body)
+
+
+def send_image(handler, content, content_type):
+
+    handler.send_response(200)
+
+    handler.send_header(
+        "Content-Type",
+        content_type
+    )
+
+    handler.send_header(
+        "Content-Length",
+        str(len(content))
+    )
+
+    handler.send_header(
+        "Cache-Control",
+        "public, max-age=3600"
+    )
+
+    handler.send_header(
+        "Access-Control-Allow-Origin",
+        "*"
+    )
+
+    handler.end_headers()
+
+    handler.wfile.write(content)
 
 
 # =========================================================
@@ -87,6 +131,7 @@ def send_json(handler, status, data):
 # =========================================================
 
 def load_state():
+
     if not GITHUB_TOKEN:
         raise RuntimeError(
             "SELLER_DATA_TOKEN تنظیم نشده است."
@@ -98,6 +143,7 @@ def load_state():
     )
 
     if response.status_code == 404:
+
         return {
             "last_update_id": -1,
             "users": {},
@@ -110,7 +156,10 @@ def load_state():
     item = response.json()
 
     raw = base64.b64decode(item["content"])
-    state = json.loads(raw.decode("utf-8"))
+
+    state = json.loads(
+        raw.decode("utf-8")
+    )
 
     if not isinstance(state, dict):
         raise ValueError(
@@ -130,12 +179,17 @@ def load_state():
     ids = []
 
     for listing in state["listings"]:
+
         try:
-            ids.append(int(listing.get("id", 0)))
+            ids.append(
+                int(listing.get("id", 0))
+            )
+
         except (TypeError, ValueError):
             pass
 
     if ids:
+
         state["next_id"] = max(
             int(state["next_id"]),
             max(ids) + 1
@@ -145,6 +199,7 @@ def load_state():
 
 
 def save_state(state, sha):
+
     encoded = base64.b64encode(
         json.dumps(
             state,
@@ -173,11 +228,9 @@ def save_state(state, sha):
 
 
 def append_listing(listing):
-    """
-    تلاش مجدد برای کاهش خطای SHA در GitHub.
-    """
 
     for attempt in range(MAX_ATTEMPTS):
+
         state, sha = load_state()
 
         existing = next(
@@ -199,10 +252,13 @@ def append_listing(listing):
         )
 
         try:
+
             save_state(state, sha)
+
             return listing
 
         except requests.HTTPError as exc:
+
             status = (
                 exc.response.status_code
                 if exc.response is not None
@@ -213,7 +269,11 @@ def append_listing(listing):
                 status in (409, 422)
                 and attempt < MAX_ATTEMPTS - 1
             ):
-                time.sleep(0.5 * (attempt + 1))
+
+                time.sleep(
+                    0.5 * (attempt + 1)
+                )
+
                 continue
 
             raise
@@ -228,6 +288,7 @@ def append_listing(listing):
 # =========================================================
 
 def clean_text(value, limit=MAX_TEXT_LENGTH):
+
     if not isinstance(value, str):
         return ""
 
@@ -235,11 +296,14 @@ def clean_text(value, limit=MAX_TEXT_LENGTH):
 
 
 def valid_phone(value):
+
     digits = re.sub(r"\D", "", value)
+
     return 8 <= len(digits) <= 15
 
 
 def escape_html(value):
+
     value = str(value or "")
 
     return (
@@ -251,6 +315,7 @@ def escape_html(value):
 
 
 def telegram_call(method, data=None, files=None):
+
     if not TELEGRAM_TOKEN:
         raise RuntimeError(
             "TELEGRAM_BOT_TOKEN تنظیم نشده است."
@@ -268,6 +333,7 @@ def telegram_call(method, data=None, files=None):
     result = response.json()
 
     if not result.get("ok"):
+
         raise RuntimeError(
             "درخواست تلگرام ناموفق بود: "
             + str(
@@ -279,6 +345,89 @@ def telegram_call(method, data=None, files=None):
         )
 
     return result["result"]
+
+
+# =========================================================
+# دریافت عکس امن از تلگرام
+# =========================================================
+
+def get_public_photo(listing_id):
+
+    state, _ = load_state()
+
+    listing = next(
+        (
+            item for item in state.get("listings", [])
+            if str(item.get("id")) == str(listing_id)
+        ),
+        None
+    )
+
+    if not listing:
+        raise ValueError(
+            "آگهی موردنظر پیدا نشد."
+        )
+
+    # فقط عکس آگهی‌های منتشرشده و فروخته‌شده عمومی است.
+    if listing.get("status") not in (
+        "published",
+        "sold"
+    ):
+        raise ValueError(
+            "عکس این آگهی در دسترس عمومی نیست."
+        )
+
+    file_id = listing.get("photo")
+
+    if not file_id:
+        raise ValueError(
+            "عکس برای این آگهی ثبت نشده است."
+        )
+
+    # دریافت مسیر فایل از تلگرام
+    file_info = telegram_call(
+        "getFile",
+        data={
+            "file_id": file_id
+        }
+    )
+
+    file_path = file_info.get("file_path")
+
+    if not file_path:
+        raise RuntimeError(
+            "مسیر عکس از تلگرام دریافت نشد."
+        )
+
+    # دریافت خود فایل از سرور تلگرام
+    file_url = (
+        f"https://api.telegram.org/file/"
+        f"bot{TELEGRAM_TOKEN}/{file_path}"
+    )
+
+    response = requests.get(
+        file_url,
+        timeout=60
+    )
+
+    response.raise_for_status()
+
+    content = response.content
+
+    if not content:
+        raise RuntimeError(
+            "فایل عکس خالی است."
+        )
+
+    content_type = (
+        mimetypes.guess_type(file_path)[0]
+        or "image/jpeg"
+    )
+
+    if not content_type.startswith("image/"):
+        content_type = "image/jpeg"
+
+    return content, content_type
 
 
 # =========================================================
@@ -296,7 +445,6 @@ def parse_request(handler):
         handler.headers.get_all("Content-Length") or []
     )
 
-    # اطلاعات تشخیصی برای Vercel Logs
     print(
         "REQUEST CONTENT-LENGTH:",
         repr(length_values)
@@ -312,7 +460,6 @@ def parse_request(handler):
         repr(handler.headers.get("Transfer-Encoding"))
     )
 
-    # بررسی Content-Length
     if not length_values:
         raise ValueError(
             "سرور طول درخواست را دریافت نکرده است."
@@ -331,7 +478,9 @@ def parse_request(handler):
                     "مقدار طول درخواست در سرور معتبر نیست."
                 )
 
-            parsed_lengths.append(int(part))
+            parsed_lengths.append(
+                int(part)
+            )
 
     if (
         not parsed_lengths
@@ -353,7 +502,6 @@ def parse_request(handler):
             "حجم کل درخواست بیشتر از ۴ مگابایت است."
         )
 
-    # خواندن بدنه درخواست
     raw = handler.rfile.read(length)
 
     if len(raw) != length:
@@ -361,10 +509,10 @@ def parse_request(handler):
             "دریافت اطلاعات فرم ناقص انجام شد."
         )
 
-    # پردازش multipart
     if "multipart/form-data" in content_type.lower():
 
         try:
+
             message = BytesParser(
                 policy=policy.default
             ).parsebytes(
@@ -375,6 +523,7 @@ def parse_request(handler):
             )
 
         except Exception:
+
             raise ValueError(
                 "ساختار اطلاعات و فایل‌های ارسالی معتبر نیست."
             )
@@ -445,7 +594,6 @@ def parse_request(handler):
 
         return fields, uploads
 
-    # پردازش JSON
     if "application/json" in content_type.lower():
 
         data = json.loads(
@@ -596,7 +744,6 @@ def normalize_listing(data, listing_id, photo_file_id):
             "تأیید داشتن فاکتور معتبر الزامی است."
         )
 
-    # زیورآلات
     if category == "jewelry":
 
         subtype = clean_text(
@@ -618,7 +765,6 @@ def normalize_listing(data, listing_id, photo_file_id):
         title = subtype
         weight_unit = "گرم"
 
-    # سکه
     elif category == "coin":
 
         subtype = clean_text(
@@ -636,7 +782,6 @@ def normalize_listing(data, listing_id, photo_file_id):
         title = product_type
         weight_unit = "گرم"
 
-    # سکه پارسیان
     elif category == "parsian":
 
         product_type_key = "coin"
@@ -659,7 +804,6 @@ def normalize_listing(data, listing_id, photo_file_id):
         weight = parsian_weight
         weight_unit = "سوت"
 
-    # طلای آب‌شده
     elif category == "melted":
 
         product_type_key = "melted_gold"
@@ -668,6 +812,7 @@ def normalize_listing(data, listing_id, photo_file_id):
         weight_unit = "گرم"
 
     else:
+
         raise ValueError(
             "دسته‌بندی انتخاب‌شده معتبر نیست."
         )
@@ -675,7 +820,6 @@ def normalize_listing(data, listing_id, photo_file_id):
     if not weight:
         weight = "ثبت نشده"
 
-    # اطلاعات قیمت
     fixed_price = clean_text(
         data.get("fixedPrice"),
         50
@@ -726,10 +870,12 @@ def normalize_listing(data, listing_id, photo_file_id):
             )
 
         try:
+
             if float(percent) < 0:
                 raise ValueError()
 
         except ValueError:
+
             raise ValueError(
                 "درصد قیمت‌گذاری معتبر نیست."
             )
@@ -951,7 +1097,6 @@ def create_listing(data, uploads):
         "فاکتور فروش",
     )
 
-    # ارسال عکس محصول به مدیر
     photo_message = send_product_photo(photo)
 
     photos = photo_message.get("photo") or []
@@ -963,28 +1108,25 @@ def create_listing(data, uploads):
 
     photo_file_id = photos[-1]["file_id"]
 
-    # دریافت شناسه آگهی
     state, _ = load_state()
 
     listing_id = int(
         state.get("next_id", 1)
     )
 
-    # تبدیل اطلاعات فرم
     listing = normalize_listing(
         data,
         listing_id,
         photo_file_id
     )
 
-    # ذخیره آگهی
     append_listing(listing)
 
-    # ارسال فاکتور
     invoice_sent = False
     invoice_error = False
 
     try:
+
         send_invoice(
             invoice,
             listing_id
@@ -993,6 +1135,7 @@ def create_listing(data, uploads):
         invoice_sent = True
 
     except Exception as exc:
+
         print(
             "INVOICE SEND ERROR:",
             repr(exc)
@@ -1000,12 +1143,14 @@ def create_listing(data, uploads):
 
         invoice_error = True
 
-    # اطلاع‌رسانی به مدیر
     try:
+
         notify_admin(listing)
+
         notified = True
 
     except Exception as exc:
+
         print(
             "ADMIN NOTIFICATION ERROR:",
             repr(exc)
@@ -1049,7 +1194,6 @@ def public_listing(item):
         "pricing_method",
         "price",
         "created_at",
-        "photo_url",
         "status",
     )
 
@@ -1059,7 +1203,19 @@ def public_listing(item):
         if key in item
     }
 
-    result["status"] = "published"
+    # حفظ وضعیت واقعی آگهی
+    result["status"] = item.get("status", "pending")
+
+    # آدرس عکس از مسیر امن API
+    if item.get("photo"):
+
+        result["photo_url"] = (
+            f"{PUBLIC_API_URL}?photo={item['id']}"
+        )
+
+    else:
+
+        result["photo_url"] = item.get("photo_url")
 
     return result
 
@@ -1071,17 +1227,61 @@ def public_listing(item):
 class handler(BaseHTTPRequestHandler):
 
     def do_OPTIONS(self):
-        send_json(self, 204, {})
+
+        send_json(
+            self,
+            204,
+            {}
+        )
 
     def do_GET(self):
 
         try:
+
+            query = parse_qs(
+                urlsplit(self.path).query
+            )
+
+            # درخواست دریافت عکس
+            photo_id = query.get("photo", [None])[0]
+
+            if photo_id is not None:
+
+                if not str(photo_id).isdigit():
+
+                    send_json(
+                        self,
+                        400,
+                        {
+                            "ok": False,
+                            "error": "شناسه عکس معتبر نیست."
+                        }
+                    )
+
+                    return
+
+                content, content_type = get_public_photo(
+                    photo_id
+                )
+
+                send_image(
+                    self,
+                    content,
+                    content_type
+                )
+
+                return
+
+            # درخواست فهرست آگهی‌ها
             state, _ = load_state()
 
             published = [
                 public_listing(item)
                 for item in state.get("listings", [])
-                if item.get("status") == "published"
+                if item.get("status") in (
+                    "published",
+                    "sold"
+                )
             ]
 
             send_json(
@@ -1090,6 +1290,22 @@ class handler(BaseHTTPRequestHandler):
                 {
                     "ok": True,
                     "listings": published,
+                }
+            )
+
+        except ValueError as exc:
+
+            print(
+                "GET VALIDATION ERROR:",
+                repr(exc)
+            )
+
+            send_json(
+                self,
+                404,
+                {
+                    "ok": False,
+                    "error": str(exc),
                 }
             )
 
@@ -1105,7 +1321,7 @@ class handler(BaseHTTPRequestHandler):
                 500,
                 {
                     "ok": False,
-                    "error": "خواندن آگهی‌ها ناموفق بود.",
+                    "error": "خواندن آگهی‌ها یا دریافت عکس ناموفق بود.",
                 }
             )
 
@@ -1184,6 +1400,7 @@ class handler(BaseHTTPRequestHandler):
             )
 
     def log_message(self, format, *args):
+
         print(
             "HTTP LOG:",
             format % args
