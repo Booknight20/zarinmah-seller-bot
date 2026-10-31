@@ -1,4 +1,3 @@
-
 import base64
 import json
 import os
@@ -466,8 +465,6 @@ def normalize_listing(data, listing_id, photo_file_id):
     return {
         "id": listing_id,
         "source": "website",
-        # مالک سایت حساب تلگرام ثبت‌کننده ندارد.
-        # قرار دادن شناسه مدیر از خطای ارسال پیام به owner_id=None جلوگیری می‌کند.
         "owner_id": ADMIN_ID,
         "kind": "user",
         "seller_name": name,
@@ -586,6 +583,10 @@ def notify_admin(listing):
     )
 
 
+# =========================================================
+# ثبت آگهی
+# =========================================================
+
 def create_listing(data, uploads):
     photo = validate_upload(
         uploads.get("sellerPhoto") or uploads.get("photo"),
@@ -604,7 +605,6 @@ def create_listing(data, uploads):
         "فاکتور فروش",
     )
 
-    # ابتدا عکس را به تلگرام می‌فرستیم تا file_id موردنیاز ربات را بگیریم.
     photo_message = send_product_photo(photo)
     photos = photo_message.get("photo") or []
 
@@ -613,16 +613,13 @@ def create_listing(data, uploads):
 
     photo_file_id = photos[-1]["file_id"]
 
-    # شناسه را از state می‌گیریم؛ در صورت تداخل، بار دیگر بررسی می‌کنیم.
     state, _ = load_state()
     listing_id = int(state.get("next_id", 1))
 
     listing = normalize_listing(data, listing_id, photo_file_id)
 
-    # ذخیره آگهی قبل از ارسال دکمه‌های تأیید.
     append_listing(listing)
 
-    # فاکتور فقط در گفت‌وگوی مدیر ارسال می‌شود؛ در state ذخیره نمی‌شود.
     invoice_sent = False
     invoice_error = False
 
