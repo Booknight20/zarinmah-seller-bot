@@ -1,7 +1,6 @@
-
+python
 import base64
 import json
-import mimetypes
 import os
 import re
 import time
@@ -9,7 +8,6 @@ from datetime import datetime, timezone
 from email import policy
 from email.parser import BytesParser
 from http.server import BaseHTTPRequestHandler
-from urllib.parse import urlsplit, parse_qs
 
 import requests
 
@@ -26,17 +24,15 @@ TELEGRAM_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 
 ADMIN_ID = 8816884849
 
+# آدرس API ربات فروشنده
+API_BASE_URL = "https://zarinmah-seller-bot.vercel.app"
+
 GITHUB_API = (
     f"https://api.github.com/repos/"
     f"{DATA_REPO}/contents/{STATE_PATH}"
 )
 
 TG_API = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
-
-# آدرس عمومی API ربات
-PUBLIC_API_URL = (
-    "https://zarinmah-seller-bot.vercel.app/api/listings"
-)
 
 SESSION = requests.Session()
 SESSION.headers.update({
@@ -69,7 +65,10 @@ def send_json(handler, status, data):
         "application/json; charset=utf-8"
     )
 
-    handler.send_header("Cache-Control", "no-store")
+    handler.send_header(
+        "Cache-Control",
+        "no-store"
+    )
 
     handler.send_header(
         "Access-Control-Allow-Origin",
@@ -95,35 +94,6 @@ def send_json(handler, status, data):
 
     if status != 204:
         handler.wfile.write(body)
-
-
-def send_image(handler, content, content_type):
-
-    handler.send_response(200)
-
-    handler.send_header(
-        "Content-Type",
-        content_type
-    )
-
-    handler.send_header(
-        "Content-Length",
-        str(len(content))
-    )
-
-    handler.send_header(
-        "Cache-Control",
-        "public, max-age=3600"
-    )
-
-    handler.send_header(
-        "Access-Control-Allow-Origin",
-        "*"
-    )
-
-    handler.end_headers()
-
-    handler.wfile.write(content)
 
 
 # =========================================================
@@ -155,7 +125,9 @@ def load_state():
 
     item = response.json()
 
-    raw = base64.b64decode(item["content"])
+    raw = base64.b64decode(
+        item["content"]
+    )
 
     state = json.loads(
         raw.decode("utf-8")
@@ -228,6 +200,9 @@ def save_state(state, sha):
 
 
 def append_listing(listing):
+    """
+    تلاش مجدد برای کاهش خطای SHA در GitHub.
+    """
 
     for attempt in range(MAX_ATTEMPTS):
 
@@ -297,7 +272,11 @@ def clean_text(value, limit=MAX_TEXT_LENGTH):
 
 def valid_phone(value):
 
-    digits = re.sub(r"\D", "", value)
+    digits = re.sub(
+        r"\D",
+        "",
+        value
+    )
 
     return 8 <= len(digits) <= 15
 
@@ -348,89 +327,6 @@ def telegram_call(method, data=None, files=None):
 
 
 # =========================================================
-# دریافت عکس امن از تلگرام
-# =========================================================
-
-def get_public_photo(listing_id):
-
-    state, _ = load_state()
-
-    listing = next(
-        (
-            item for item in state.get("listings", [])
-            if str(item.get("id")) == str(listing_id)
-        ),
-        None
-    )
-
-    if not listing:
-        raise ValueError(
-            "آگهی موردنظر پیدا نشد."
-        )
-
-    # فقط عکس آگهی‌های منتشرشده و فروخته‌شده عمومی است.
-    if listing.get("status") not in (
-        "published",
-        "sold"
-    ):
-        raise ValueError(
-            "عکس این آگهی در دسترس عمومی نیست."
-        )
-
-    file_id = listing.get("photo")
-
-    if not file_id:
-        raise ValueError(
-            "عکس برای این آگهی ثبت نشده است."
-        )
-
-    # دریافت مسیر فایل از تلگرام
-    file_info = telegram_call(
-        "getFile",
-        data={
-            "file_id": file_id
-        }
-    )
-
-    file_path = file_info.get("file_path")
-
-    if not file_path:
-        raise RuntimeError(
-            "مسیر عکس از تلگرام دریافت نشد."
-        )
-
-    # دریافت خود فایل از سرور تلگرام
-    file_url = (
-        f"https://api.telegram.org/file/"
-        f"bot{TELEGRAM_TOKEN}/{file_path}"
-    )
-
-    response = requests.get(
-        file_url,
-        timeout=60
-    )
-
-    response.raise_for_status()
-
-    content = response.content
-
-    if not content:
-        raise RuntimeError(
-            "فایل عکس خالی است."
-        )
-
-    content_type = (
-        mimetypes.guess_type(file_path)[0]
-        or "image/jpeg"
-    )
-
-    if not content_type.startswith("image/"):
-        content_type = "image/jpeg"
-
-    return content, content_type
-
-
-# =========================================================
 # خواندن multipart/form-data
 # =========================================================
 
@@ -461,6 +357,7 @@ def parse_request(handler):
     )
 
     if not length_values:
+
         raise ValueError(
             "سرور طول درخواست را دریافت نکرده است."
         )
@@ -474,6 +371,7 @@ def parse_request(handler):
             part = part.strip()
 
             if not part.isdigit():
+
                 raise ValueError(
                     "مقدار طول درخواست در سرور معتبر نیست."
                 )
@@ -486,6 +384,7 @@ def parse_request(handler):
         not parsed_lengths
         or len(set(parsed_lengths)) != 1
     ):
+
         raise ValueError(
             "مقادیر طول درخواست با یکدیگر مطابقت ندارند."
         )
@@ -493,11 +392,13 @@ def parse_request(handler):
     length = parsed_lengths[0]
 
     if length <= 0:
+
         raise ValueError(
             "اطلاعات فرم دریافت نشد."
         )
 
     if length > MAX_BODY_SIZE:
+
         raise ValueError(
             "حجم کل درخواست بیشتر از ۴ مگابایت است."
         )
@@ -505,6 +406,7 @@ def parse_request(handler):
     raw = handler.rfile.read(length)
 
     if len(raw) != length:
+
         raise ValueError(
             "دریافت اطلاعات فرم ناقص انجام شد."
         )
@@ -532,6 +434,7 @@ def parse_request(handler):
         uploads = {}
 
         if not message.is_multipart():
+
             raise ValueError(
                 "ساختار فایل‌های ارسالی معتبر نیست."
             )
@@ -601,6 +504,7 @@ def parse_request(handler):
         )
 
         if not isinstance(data, dict):
+
             raise ValueError(
                 "ساختار اطلاعات فرم معتبر نیست."
             )
@@ -615,16 +519,19 @@ def parse_request(handler):
 def validate_upload(upload, allowed_types, label):
 
     if not upload or not upload.get("content"):
+
         raise ValueError(
             f"ارسال {label} الزامی است."
         )
 
     if len(upload["content"]) > MAX_FILE_SIZE:
+
         raise ValueError(
             f"حجم {label} باید حداکثر ۱٫۵ مگابایت باشد."
         )
 
     if upload["content_type"] not in allowed_types:
+
         raise ValueError(
             f"فرمت {label} مجاز نیست."
         )
@@ -724,11 +631,13 @@ def normalize_listing(data, listing_id, photo_file_id):
         category,
         description
     ]):
+
         raise ValueError(
             "نام، شماره تماس، دسته‌بندی و توضیحات الزامی هستند."
         )
 
     if not valid_phone(phone):
+
         raise ValueError(
             "شماره تماس واردشده معتبر نیست."
         )
@@ -740,10 +649,12 @@ def normalize_listing(data, listing_id, photo_file_id):
         "yes",
         "بله"
     ):
+
         raise ValueError(
             "تأیید داشتن فاکتور معتبر الزامی است."
         )
 
+    # زیورآلات
     if category == "jewelry":
 
         subtype = clean_text(
@@ -752,6 +663,7 @@ def normalize_listing(data, listing_id, photo_file_id):
         )
 
         if not subtype:
+
             raise ValueError(
                 "نوع زیورآلات را انتخاب کنید."
             )
@@ -765,6 +677,7 @@ def normalize_listing(data, listing_id, photo_file_id):
         title = subtype
         weight_unit = "گرم"
 
+    # سکه
     elif category == "coin":
 
         subtype = clean_text(
@@ -773,6 +686,7 @@ def normalize_listing(data, listing_id, photo_file_id):
         )
 
         if subtype not in COIN_MAP:
+
             raise ValueError(
                 "نوع سکه را به‌درستی انتخاب کنید."
             )
@@ -782,6 +696,7 @@ def normalize_listing(data, listing_id, photo_file_id):
         title = product_type
         weight_unit = "گرم"
 
+    # سکه پارسیان
     elif category == "parsian":
 
         product_type_key = "coin"
@@ -797,6 +712,7 @@ def normalize_listing(data, listing_id, photo_file_id):
             not parsian_weight
             or not parsian_weight.isdigit()
         ):
+
             raise ValueError(
                 "وزن سکه پارسیان را برحسب سوت وارد کنید."
             )
@@ -804,6 +720,7 @@ def normalize_listing(data, listing_id, photo_file_id):
         weight = parsian_weight
         weight_unit = "سوت"
 
+    # طلای آب‌شده
     elif category == "melted":
 
         product_type_key = "melted_gold"
@@ -820,6 +737,7 @@ def normalize_listing(data, listing_id, photo_file_id):
     if not weight:
         weight = "ثبت نشده"
 
+    # اطلاعات قیمت
     fixed_price = clean_text(
         data.get("fixedPrice"),
         50
@@ -843,6 +761,7 @@ def normalize_listing(data, listing_id, photo_file_id):
     }
 
     if method not in price_method_map:
+
         raise ValueError(
             "روش قیمت‌گذاری را انتخاب کنید."
         )
@@ -855,6 +774,7 @@ def normalize_listing(data, listing_id, photo_file_id):
             not fixed_price.isdigit()
             or int(fixed_price) <= 0
         ):
+
             raise ValueError(
                 "قیمت ثابت معتبر وارد کنید."
             )
@@ -865,6 +785,7 @@ def normalize_listing(data, listing_id, photo_file_id):
     elif method == "percent":
 
         if not percent:
+
             raise ValueError(
                 "درصد بالاتر از قیمت تابلو را وارد کنید."
             )
@@ -886,6 +807,7 @@ def normalize_listing(data, listing_id, photo_file_id):
     elif method == "amount":
 
         if not amount.isdigit():
+
             raise ValueError(
                 "مبلغ بالاتر از قیمت تابلو را وارد کنید."
             )
@@ -1097,31 +1019,37 @@ def create_listing(data, uploads):
         "فاکتور فروش",
     )
 
+    # ارسال عکس محصول به مدیر
     photo_message = send_product_photo(photo)
 
     photos = photo_message.get("photo") or []
 
     if not photos:
+
         raise RuntimeError(
             "تلگرام file_id عکس محصول را برنگرداند."
         )
 
     photo_file_id = photos[-1]["file_id"]
 
+    # دریافت شناسه آگهی
     state, _ = load_state()
 
     listing_id = int(
         state.get("next_id", 1)
     )
 
+    # تبدیل اطلاعات فرم
     listing = normalize_listing(
         data,
         listing_id,
         photo_file_id
     )
 
+    # ذخیره آگهی
     append_listing(listing)
 
+    # ارسال فاکتور
     invoice_sent = False
     invoice_error = False
 
@@ -1143,6 +1071,7 @@ def create_listing(data, uploads):
 
         invoice_error = True
 
+    # اطلاع‌رسانی به مدیر
     try:
 
         notify_admin(listing)
@@ -1204,18 +1133,28 @@ def public_listing(item):
     }
 
     # حفظ وضعیت واقعی آگهی
-    result["status"] = item.get("status", "pending")
+    result["status"] = item.get(
+        "status",
+        "pending"
+    )
 
-    # آدرس عکس از مسیر امن API
+    # ساخت آدرس عکس از روی شناسه آگهی
+    # فایل api/photo.py در مرحله بعد باید ایجاد شود.
     if item.get("photo"):
 
         result["photo_url"] = (
-            f"{PUBLIC_API_URL}?photo={item['id']}"
+            f"{API_BASE_URL}/api/photo"
+            f"?id={item['id']}"
         )
+
+    elif item.get("photo_url"):
+
+        # سازگاری با آگهی‌های قدیمی که URL عکس دارند
+        result["photo_url"] = item["photo_url"]
 
     else:
 
-        result["photo_url"] = item.get("photo_url")
+        result["photo_url"] = None
 
     return result
 
@@ -1238,50 +1177,19 @@ class handler(BaseHTTPRequestHandler):
 
         try:
 
-            query = parse_qs(
-                urlsplit(self.path).query
-            )
-
-            # درخواست دریافت عکس
-            photo_id = query.get("photo", [None])[0]
-
-            if photo_id is not None:
-
-                if not str(photo_id).isdigit():
-
-                    send_json(
-                        self,
-                        400,
-                        {
-                            "ok": False,
-                            "error": "شناسه عکس معتبر نیست."
-                        }
-                    )
-
-                    return
-
-                content, content_type = get_public_photo(
-                    photo_id
-                )
-
-                send_image(
-                    self,
-                    content,
-                    content_type
-                )
-
-                return
-
-            # درخواست فهرست آگهی‌ها
             state, _ = load_state()
+
+            visible_statuses = {
+                "published",
+                "sold",
+            }
 
             published = [
                 public_listing(item)
+
                 for item in state.get("listings", [])
-                if item.get("status") in (
-                    "published",
-                    "sold"
-                )
+
+                if item.get("status") in visible_statuses
             ]
 
             send_json(
@@ -1290,22 +1198,6 @@ class handler(BaseHTTPRequestHandler):
                 {
                     "ok": True,
                     "listings": published,
-                }
-            )
-
-        except ValueError as exc:
-
-            print(
-                "GET VALIDATION ERROR:",
-                repr(exc)
-            )
-
-            send_json(
-                self,
-                404,
-                {
-                    "ok": False,
-                    "error": str(exc),
                 }
             )
 
@@ -1321,7 +1213,7 @@ class handler(BaseHTTPRequestHandler):
                 500,
                 {
                     "ok": False,
-                    "error": "خواندن آگهی‌ها یا دریافت عکس ناموفق بود.",
+                    "error": "خواندن آگهی‌ها ناموفق بود.",
                 }
             )
 
