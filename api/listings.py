@@ -39,7 +39,7 @@ SESSION.headers.update({
 })
 
 MAX_BODY_SIZE = 4 * 1024 * 1024
-MAX_FILE_SIZE =  1500 * 1024
+MAX_FILE_SIZE = 1500 * 1024
 MAX_TEXT_LENGTH = 1500
 MAX_ATTEMPTS = 4
 
@@ -245,13 +245,17 @@ def telegram_call(method, data=None, files=None):
 
 def parse_request(handler):
     content_type = handler.headers.get("Content-Type", "")
-    length = int(handler.headers.get("Content-Length", "0"))
+    raw_length = handler.headers.get("Content-Length", "0").strip()
 
+    if not raw_length.isdigit():
+        raise ValueError("حجم درخواست نامعتبر است؛ لطفاً دوباره تلاش کنید.")
+
+    length = int(raw_length)
     if length <= 0:
         raise ValueError("اطلاعات فرم دریافت نشد.")
 
     if length > MAX_BODY_SIZE:
-        raise ValueError("حجم کل درخواست بیشتر از حد مجاز است.")
+        raise ValueError("حجم کل درخواست بیشتر از ۴ مگابایت است.")
 
     raw = handler.rfile.read(length)
 
@@ -312,7 +316,7 @@ def validate_upload(upload, allowed_types, label):
         raise ValueError(f"ارسال {label} الزامی است.")
 
     if len(upload["content"]) > MAX_FILE_SIZE:
-        raise ValueError(f"حجم {label} باید حداکثر ۵ مگابایت باشد.")
+        raise ValueError(f"حجم {label} باید حداکثر ۱٫۵ مگابایت باشد.")
 
     if upload["content_type"] not in allowed_types:
         raise ValueError(f"فرمت {label} مجاز نیست.")
