@@ -160,20 +160,38 @@ def get_telegram_photo(file_id):
     photo_response.raise_for_status()
 
     content_type = photo_response.headers.get(
-        "Content-Type",
-        "image/jpeg"
+    "Content-Type",
+    ""
+).split(";")[0].strip().lower()
+
+image_signatures = {
+    "image/jpeg": photo_response.content.startswith(b"\xff\xd8\xff"),
+    "image/png": photo_response.content.startswith(b"\x89PNG\r\n\x1a\n"),
+    "image/gif": photo_response.content.startswith((b"GIF87a", b"GIF89a")),
+    "image/webp": (
+        len(photo_response.content) >= 12
+        and photo_response.content[:4] == b"RIFF"
+        and photo_response.content[8:12] == b"WEBP"
+    ),
+}
+
+detected_type = next(
+    (
+        mime for mime, valid in image_signatures.items()
+        if valid
+    ),
+    None
+)
+
+if not detected_type:
+    raise RuntimeError(
+        "محتوای دریافتی تصویر نیست. "
+        f"HTTP={photo_response.status_code}, "
+        f"Content-Type={content_type}, "
+        f"Size={len(photo_response.content)}"
     )
 
-    if not content_type.startswith("image/"):
-        raise RuntimeError(
-            "فایل دریافتی تصویر معتبر نیست."
-        )
-
-    return (
-        photo_response.content,
-        content_type
-    )
-
+return photo_response.content, detected_type
 
 # =========================================================
 # Vercel handler
