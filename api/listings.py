@@ -1105,6 +1105,89 @@ def create_listing(data, uploads):
 
 
 # =========================================================
+# ثبت درخواست خرید از سایت
+# =========================================================
+
+def normalize_phone(value):
+    value = str(value or '').strip()
+    return re.sub(r"\D", "", value.translate(str.maketrans(
+        "۰۱۲۳۴۵۶۷۸۹٠١٢٣٤٥٦٧٨٩", "01234567890123456789"
+    )))
+
+
+def save_purchase_request(purchase_request):
+    """ذخیره درخواست خرید در همان state مشترک ربات و سایت."""
+    for attempt in range(MAX_ATTEMPTS):
+        state, sha = load_state()
+        state.setdefault("purchase_requests", [])
+        state.setdefault("next_purchase_request_id", 1)
+
+        listing = next((x for x in state["listings"]
+                        if str(x.get("id")) == str(purchase_request["listing_id"])), None)
+        if not listing or listing.get("status") != "published":
+            raise ValueError("این آگهی دیگر برای خرید در دسترس نیست.")
+
+        buyer_phone = normalize_phone(purchase_request["buyer_phone"])
+        seller_phone = normalize_phone(listing.get("contact", ""))
+        if buyer_phone and seller_phone and buyer_phone == seller_phone:
+            raise ValueError("شماره تماس خریدار و فروشنده نمی‌تواند یکسان باشد.")
+
+        duplicate = next((r for r in state["purchase_requests"]
+                          if str(r.get("listing_id")) == str(purchase_request["listing_id"])
+                          and normalize_phone(r.get("buyer_phone", "")) == buyer_phone
+                          and r.get("status") in ("pending", "forwarded")), None)
+        if duplicate:
+            raise ValueError("درخواست قبلی شما برای این آگهی ثبت شده است.")
+
+        request_id = int(state["next_purchase_request_id"])
+        record = dict(purchase_request)
+        record["id"] = request_id
+        record["created_at"] = datetime.now(timezone.utc).isoformat()
+        record["status"] = "pending"
+        state["purchase_requests"].append(record)
+        state["next_purchase_request_id"] = request_id + 1
+
+        try:
+            save_state(state, sha)
+            return record, listing
+        except requests.HTTPError as exc:
+            status = exc.response.status_code if exc.response is not None else None
+            if status in (409, 422) and attempt < MAX_ATTEMPTS - 1:
+                time.sleep(0.5 * (attempt + 1))
+                continue
+            raise
+
+    raise RuntimeError("ذخیره درخواست خرید ناموفق بود.")
+
+
+def notify_purchase_admin(purchase_request, listing):
+    request_id = purchase_request["id"]
+    message = (
+        "🛒 <b>درخواست خرید جدید از سایت زرین ماه</b>\n\n"
+        f"🆔 شماره درخواست: <code>{request_id}</code>\n"
+        f"📦 شماره آگهی: <code>{listing.get('id')}</code>\n"
+        f"💎 کالا: {escape_html(listing.get('title') or listing.get('product_type') or '')}\n"
+        f"💰 قیمت: {escape_html(listing.get('price', 'ثبت نشده'))}\n\n"
+        f"👤 نام خریدار: {escape_html(purchase_request['buyer_name'])}\n"
+        f"📞 شماره خریدار: <code>{escape_html(purchase_request['buyer_phone'])}</code>\n\n"
+        "🔒 <b>اطلاعات خصوصی فروشنده:</b>\n"
+        f"👤 {escape_html(listing.get('seller_name', 'ثبت نشده'))}\n"
+        f"📞 <code>{escape_html(listing.get('contact', 'ثبت نشده'))}</code>\n\n"
+        "برای انتقال درخواست و اطلاعات خریدار به مرحله بعد، دکمه زیر را بزنید."
+    )
+    keyboard = {"inline_keyboard": [[{
+        "text": "📨 بررسی و انتقال درخواست",
+        "callback_data": f"forward:{request_id}"
+    }]]}
+    return telegram_call("sendMessage", data={
+        "chat_id": str(ADMIN_ID),
+        "text": message,
+        "parse_mode": "HTML",
+        "reply_markup": json.dumps(keyboard, ensure_ascii=False)
+    })
+
+
+# =========================================================
 # خروجی عمومی آگهی‌ها
 # =========================================================
 
@@ -1221,6 +1304,46 @@ class handler(BaseHTTPRequestHandler):
         try:
 
             data, uploads = parse_request(self)
+
+            if not uploads and isinstance(data, dict) and data.get("action") == "purchase":
+                try:
+                    listing_id = int(data.get("listing_id", 0))
+                except (TypeError, ValueError):
+                    raise ValueError("شناسه آگهی معتبر نیست.")
+
+                buyer_name = clean_text(data.get("buyer_name"), 100)
+                buyer_phone = clean_text(data.get("buyer_phone"), 30)
+                if not buyer_name or not buyer_phone:
+                    raise ValueError("نام و شماره تماس برای ثبت درخواست الزامی است.")
+                if not valid_phone(buyer_phone):
+                    raise ValueError("شماره تماس واردشده معتبر نیست.")
+
+                purchase_request, listing = save_purchase_request({
+                    "source": "website",
+                    "listing_id": listing_id,
+                    "buyer_type": "website",
+                    "buyer_name": buyer_name,
+                    "buyer_phone": buyer_phone,
+                })
+
+                notified = True
+                try:
+                    notify_purchase_admin(purchase_request, listing)
+                except Exception as exc:
+                    print("PURCHASE ADMIN NOTIFICATION ERROR:", repr(exc))
+                    notified = False
+
+                send_json(self, 201 if notified else 202, {
+                    "ok": True,
+                    "request_id": purchase_request["id"],
+                    "admin_notification_sent": notified,
+                    "message": (
+                        "درخواست خرید برای پشتیبانی زرین ماه ارسال شد."
+                        if notified else
+                        "درخواست ثبت شد، اما اطلاع‌رسانی به مدیر کامل نشد. لطفاً با پشتیبانی تماس بگیرید و دوباره ثبت نکنید."
+                    )
+                })
+                return
 
             result = create_listing(
                 data,
