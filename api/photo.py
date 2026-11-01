@@ -284,10 +284,10 @@ class handler(BaseHTTPRequestHandler):
             )
 
             send_error(
-                self,
-                500,
-                "نمایش عکس با خطا مواجه شد."
-            )
+    self,
+    500,
+    "PHOTO ERROR: " + str(exc)
+)
 
     def do_OPTIONS(self):
 
