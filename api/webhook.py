@@ -772,6 +772,29 @@ def handle_callback(state, callback, sha, update_id):
         if not listing or listing.get("status") != "published":
             answer("آگهی دیگر منتشرشده نیست؛ درخواست ارسال نشد.", True)
             return sha
+        # آگهی‌های ثبت‌شده از سایت، شناسه تلگرام فروشنده ندارند؛
+        # مدیر پس از بررسی، از طریق شماره‌های خصوصی ثبت‌شده هماهنگی می‌کند.
+        if purchase_request.get("source") == "website" or listing.get("source") == "website":
+            seller_contact = str(listing.get("contact", "ثبت نشده"))
+            buyer_contact = str(purchase_request.get("buyer_phone", "ثبت نشده"))
+            admin_followup = (
+                "📨 <b>اطلاعات درخواست خرید سایت برای هماهنگی</b>\n\n"
+                f"🆔 درخواست: <code>{request_id}</code>\n"
+                f"📦 آگهی: <code>{listing.get('id')}</code>\n"
+                f"💎 کالا: {html.escape(str(listing.get('title') or listing.get('product_type') or ''))}\n\n"
+                f"👤 <b>خریدار:</b> {html.escape(str(purchase_request.get('buyer_name', 'ثبت نشده')))}\n"
+                f"📞 <b>شماره خریدار:</b> <code>{html.escape(buyer_contact)}</code>\n\n"
+                f"👤 <b>فروشنده:</b> {html.escape(str(listing.get('seller_name', 'ثبت نشده')))}\n"
+                f"📞 <b>شماره فروشنده:</b> <code>{html.escape(seller_contact)}</code>\n\n"
+                "🔒 این اطلاعات محرمانه است و فقط برای هماهنگی همین درخواست استفاده شود.\n"
+                "فروشنده در تلگرام ربات را متصل نکرده است؛ هماهنگی با فروشنده از طریق شماره ثبت‌شده انجام می‌شود."
+            )
+            send_message(ADMIN_ID, admin_followup)
+            purchase_request["status"] = "forwarded"
+            purchase_request["forwarded_update_id"] = update_id
+            answer("اطلاعات خریدار و فروشنده برای هماهنگی در اختیار مدیر قرار گرفت.")
+            return sha
+
         seller_id = listing.get("owner_id")
         if not seller_id:
             answer("شناسه فروشنده در آگهی ثبت نشده است.", True)
