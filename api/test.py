@@ -1,44 +1,43 @@
 
-import os
 import json
-import base64
-import requests
+import traceback
 from http.server import BaseHTTPRequestHandler
 
 class handler(BaseHTTPRequestHandler):
     def do_GET(self):
-        result = {"python": "ok"}
+        result = {}
 
         try:
-            response = requests.get(
-                "https://api.github.com/repos/Booknight20/zarinmah-seller-data/contents/state.json",
-                headers={
-                    "Authorization": f"Bearer {os.environ.get('SELLER_DATA_TOKEN', '')}",
-                    "Accept": "application/vnd.github+json"
-                },
-                timeout=15
-            )
+            import api.listings as listings
 
-            response.raise_for_status()
-            item = response.json()
+            result["import_listings"] = "ok"
 
-            raw = base64.b64decode(item["content"])
-            state = json.loads(raw.decode("utf-8"))
+            state, sha = listings.load_state()
 
-            result["json_decode"] = "ok"
-            result["state_is_dict"] = isinstance(state, dict)
-            result["listings_is_list"] = isinstance(state.get("listings"), list)
-            result["listings_count"] = len(state.get("listings", []))
+            result["load_state"] = "ok"
+            result["listing_count"] = len(state.get("listings", []))
+
+            visible = [
+                listings.public_listing(item)
+                for item in state.get("listings", [])
+                if item.get("status") in ("published", "sold")
+            ]
+
+            result["public_filter"] = "ok"
+            result["visible_count"] = len(visible)
 
         except Exception as exc:
             result["error_type"] = type(exc).__name__
-            result["error"] = str(exc)[:300]
+            result["error"] = str(exc)[:500]
+            result["traceback"] = traceback.format_exc()[-2500:]
 
-        body = json.dumps(result, ensure_ascii=False).encode("utf-8")
+        body = json.dumps(
+            result,
+            ensure_ascii=False
+        ).encode("utf-8")
 
         self.send_response(200)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
-
