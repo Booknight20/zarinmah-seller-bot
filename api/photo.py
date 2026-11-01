@@ -1,3 +1,4 @@
+
 import base64
 import json
 import os
@@ -6,10 +7,6 @@ from urllib.parse import urlparse, parse_qs
 
 import requests
 
-
-# =========================================================
-# تنظیمات
-# =========================================================
 
 DATA_REPO = "Booknight20/zarinmah-seller-data"
 STATE_PATH = "state.json"
@@ -32,262 +29,131 @@ SESSION.headers.update({
 })
 
 
-# =========================================================
-# پاسخ خطا
-# =========================================================
-
 def send_error(handler, status, message):
-
     body = message.encode("utf-8")
 
     handler.send_response(status)
-
-    handler.send_header(
-        "Content-Type",
-        "text/plain; charset=utf-8"
-    )
-
-    handler.send_header(
-        "Cache-Control",
-        "no-store"
-    )
-
-    handler.send_header(
-        "Access-Control-Allow-Origin",
-        "*"
-    )
-
-    handler.send_header(
-        "Content-Length",
-        str(len(body))
-    )
-
+    handler.send_header("Content-Type", "text/plain; charset=utf-8")
+    handler.send_header("Cache-Control", "no-store")
+    handler.send_header("Access-Control-Allow-Origin", "*")
+    handler.send_header("Content-Length", str(len(body)))
     handler.end_headers()
     handler.wfile.write(body)
 
 
-# =========================================================
-# دریافت اطلاعات آگهی
-# =========================================================
-
 def load_listing(listing_id):
-
     if not GITHUB_TOKEN:
-        raise RuntimeError(
-            "SELLER_DATA_TOKEN تنظیم نشده است."
-        )
+        raise RuntimeError("SELLER_DATA_TOKEN تنظیم نشده است.")
 
-    response = SESSION.get(
-        GITHUB_API,
-        timeout=20
-    )
-
+    response = SESSION.get(GITHUB_API, timeout=20)
     response.raise_for_status()
 
     item = response.json()
+    raw = base64.b64decode(item["content"])
+    state = json.loads(raw.decode("utf-8"))
 
-    raw = base64.b64decode(
-        item["content"]
-    )
-
-    state = json.loads(
-        raw.decode("utf-8")
-    )
-
-    listings = state.get("listings", [])
-
-    for listing in listings:
-
+    for listing in state.get("listings", []):
         if str(listing.get("id")) == str(listing_id):
-
-            # فقط آگهی‌های منتشرشده یا فروخته‌شده
-            if listing.get("status") not in (
-                "published",
-                "sold"
-            ):
+            if listing.get("status") not in ("published", "sold"):
                 return None
-
             return listing
 
     return None
 
 
-# =========================================================
-# دریافت عکس از تلگرام
-# =========================================================
-
 def get_telegram_photo(file_id):
-
     if not TELEGRAM_TOKEN:
-        raise RuntimeError(
-            "TELEGRAM_BOT_TOKEN تنظیم نشده است."
-        )
+        raise RuntimeError("TELEGRAM_BOT_TOKEN تنظیم نشده است.")
 
     response = requests.get(
         f"{TG_API}/getFile",
-        params={
-            "file_id": file_id
-        },
+        params={"file_id": file_id},
         timeout=20
     )
-
     response.raise_for_status()
 
     result = response.json()
 
     if not result.get("ok"):
-        raise RuntimeError(
-            "دریافت مسیر عکس از تلگرام ناموفق بود."
-        )
+        raise RuntimeError("دریافت مسیر عکس از تلگرام ناموفق بود.")
 
     file_path = result["result"].get("file_path")
 
     if not file_path:
-        raise RuntimeError(
-            "مسیر عکس در تلگرام پیدا نشد."
-        )
+        raise RuntimeError("مسیر عکس در تلگرام پیدا نشد.")
 
     download_url = (
         f"https://api.telegram.org/file/"
         f"bot{TELEGRAM_TOKEN}/{file_path}"
     )
 
-    photo_response = requests.get(
-        download_url,
-        timeout=30
-    )
-
+    photo_response = requests.get(download_url, timeout=30)
     photo_response.raise_for_status()
 
-    content_type = photo_response.headers.get(
-    "Content-Type",
-    ""
-).split(";")[0].strip().lower()
+    content = photo_response.content
 
-image_signatures = {
-    "image/jpeg": photo_response.content.startswith(b"\xff\xd8\xff"),
-    "image/png": photo_response.content.startswith(b"\x89PNG\r\n\x1a\n"),
-    "image/gif": photo_response.content.startswith((b"GIF87a", b"GIF89a")),
-    "image/webp": (
-        len(photo_response.content) >= 12
-        and photo_response.content[:4] == b"RIFF"
-        and photo_response.content[8:12] == b"WEBP"
-    ),
-}
+    image_signatures = {
+        "image/jpeg": content.startswith(b"\xff\xd8\xff"),
+        "image/png": content.startswith(b"\x89PNG\r\n\x1a\n"),
+        "image/gif": content.startswith((b"GIF87a", b"GIF89a")),
+        "image/webp": (
+            len(content) >= 12
+            and content[:4] == b"RIFF"
+            and content[8:12] == b"WEBP"
+        ),
+    }
 
-detected_type = next(
-    (
-        mime for mime, valid in image_signatures.items()
-        if valid
-    ),
-    None
-)
-
-if not detected_type:
-    raise RuntimeError(
-        "محتوای دریافتی تصویر نیست. "
-        f"HTTP={photo_response.status_code}, "
-        f"Content-Type={content_type}, "
-        f"Size={len(photo_response.content)}"
+    detected_type = next(
+        (mime for mime, valid in image_signatures.items() if valid),
+        None
     )
 
-return photo_response.content, detected_type
+    if not detected_type:
+        content_type = photo_response.headers.get("Content-Type", "")
+        raise RuntimeError(
+            "محتوای دریافتی تصویر نیست. "
+            f"Content-Type={content_type}, Size={len(content)}"
+        )
 
-# =========================================================
-# Vercel handler
-# =========================================================
+    return content, detected_type
+
 
 class handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
-
         try:
-
             parsed = urlparse(self.path)
-
-            params = parse_qs(
-                parsed.query
-            )
-
-            listing_id = (
-                params.get("id", [""])[0]
-            )
+            params = parse_qs(parsed.query)
+            listing_id = params.get("id", [""])[0]
 
             if not listing_id.isdigit():
-
-                send_error(
-                    self,
-                    400,
-                    "شناسه آگهی معتبر نیست."
-                )
-
+                send_error(self, 400, "شناسه آگهی معتبر نیست.")
                 return
 
-            listing = load_listing(
-                listing_id
-            )
+            listing = load_listing(listing_id)
 
             if not listing:
-
-                send_error(
-                    self,
-                    404,
-                    "عکس آگهی پیدا نشد."
-                )
-
+                send_error(self, 404, "عکس آگهی پیدا نشد.")
                 return
 
             file_id = listing.get("photo")
 
             if not file_id:
-
-                send_error(
-                    self,
-                    404,
-                    "برای این آگهی عکسی ثبت نشده است."
-                )
-
+                send_error(self, 404, "برای این آگهی عکسی ثبت نشده است.")
                 return
 
-            photo_content, content_type = get_telegram_photo(
-                file_id
-            )
+            photo_content, content_type = get_telegram_photo(file_id)
 
             self.send_response(200)
-
-            self.send_header(
-                "Content-Type",
-                content_type
-            )
-
-            self.send_header(
-                "Content-Length",
-                str(len(photo_content))
-            )
-
-            self.send_header(
-                "Cache-Control",
-                "public, max-age=3600"
-            )
-
-            self.send_header(
-                "Access-Control-Allow-Origin",
-                "*"
-            )
-
+            self.send_header("Content-Type", content_type)
+            self.send_header("Content-Length", str(len(photo_content)))
+            self.send_header("Cache-Control", "public, max-age=3600")
+            self.send_header("Access-Control-Allow-Origin", "*")
             self.end_headers()
-
-            self.wfile.write(
-                photo_content
-            )
+            self.wfile.write(photo_content)
 
         except requests.HTTPError as exc:
-
-            print(
-                "PHOTO HTTP ERROR:",
-                repr(exc)
-            )
-
+            print("PHOTO HTTP ERROR:", repr(exc))
             send_error(
                 self,
                 502,
@@ -295,37 +161,18 @@ class handler(BaseHTTPRequestHandler):
             )
 
         except Exception as exc:
-
-            print(
-                "PHOTO ERROR:",
-                repr(exc)
+            print("PHOTO ERROR:", repr(exc))
+            send_error(
+                self,
+                500,
+                "PHOTO ERROR: " + str(exc)
             )
 
-            send_error(
-    self,
-    500,
-    "PHOTO ERROR: " + str(exc)
-)
-
     def do_OPTIONS(self):
-
         self.send_response(204)
-
-        self.send_header(
-            "Access-Control-Allow-Origin",
-            "*"
-        )
-
-        self.send_header(
-            "Access-Control-Allow-Methods",
-            "GET, OPTIONS"
-        )
-
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Methods", "GET, OPTIONS")
         self.end_headers()
 
     def log_message(self, format, *args):
-
-        print(
-            "PHOTO LOG:",
-            format % args
-        )
+        print("PHOTO LOG:", format % args)
