@@ -3,6 +3,7 @@ import hashlib
 import html
 import hmac
 import json
+import logging
 import os
 import re
 import uuid
@@ -11,6 +12,10 @@ from http.server import BaseHTTPRequestHandler
 from urllib.parse import quote
 
 import requests
+
+# لاگ کامل خطاها در Runtime Logs پروژه Vercel
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("zarinmah.webhook")
 
 # ZarinMah Telegram webhook — Supabase is the source of truth for listings/orders.
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
@@ -362,11 +367,28 @@ def get_telegram_file(file_id):
 
 
 def upload_telegram_file(file_id, bucket, object_path, mime):
-    content, _ = get_telegram_file(file_id)
-    if len(content) > 10 * 1024 * 1024:
+    """دانلود فایل از تلگرام و آپلود در باکت مناسب Supabase."""
+    if not file_id:
+        raise ValueError("شناسه فایل تلگرام خالی است.")
+    logger.info("FILE_UPLOAD_START bucket=%s object=%s", bucket, object_path)
+    content, telegram_path = get_telegram_file(file_id)
+    size = len(content)
+    if size <= 0:
+        raise ValueError("فایل دریافتی از تلگرام خالی است.")
+    if size > 10 * 1024 * 1024:
         raise ValueError("حجم فایل تلگرام بیش از حد مجاز است.")
     encoded = "/".join(quote(part, safe="") for part in object_path.split("/"))
-    sb("POST", f"/storage/v1/object/{bucket}/{encoded}", raw=content, content_type=mime, prefer="resolution=ignore-duplicates")
+    sb(
+        "POST",
+        f"/storage/v1/object/{bucket}/{encoded}",
+        raw=content,
+        content_type=mime,
+        prefer="resolution=ignore-duplicates",
+    )
+    logger.info(
+        "FILE_UPLOAD_OK bucket=%s object=%s bytes=%s telegram_path=%s",
+        bucket, object_path, size, telegram_path,
+    )
     if bucket == "listing-images":
         return f"{SUPABASE_URL}/storage/v1/object/public/{bucket}/{encoded}"
     return object_path
@@ -481,64 +503,107 @@ def notify_admin_pending(listing):
 
 
 def finish_listing(state, user_id, chat_id):
+    """ثبت آگهی؛ مرحله شکست در لاگ Vercel با traceback کامل ثبت می‌شود."""
     user = get_user(state, user_id)
     draft = user.get("draft") or {}
     if not draft.get("photo_file_id") or not draft.get("invoice_file_id"):
         ask(chat_id, "عکس محصول و فاکتور فروش هر دو الزامی هستند.")
         return
-    token = uuid.uuid4().hex
-    photo_ext = "jpg"
-    invoice_ext = draft.get("invoice_ext", "pdf")
-    photo_path = f"telegram/{token}.{photo_ext}"
-    invoice_path = f"telegram/{token}.{invoice_ext}"
-    photo_url = upload_telegram_file(draft["photo_file_id"], "listing-images", photo_path, "image/jpeg")
-    invoice_mime = draft.get("invoice_mime", "application/pdf")
-    saved_invoice = upload_telegram_file(draft["invoice_file_id"], "listing-invoices", invoice_path, invoice_mime)
-    is_admin = str(user_id) == str(ADMIN_ID) and draft.get("kind") == "admin"
-    row = {
-        "owner_user_id": None,
-        "owner_telegram_id": str(user_id),
-        "title": clean(draft.get("title"), 150) or clean(draft.get("product_type"), 150),
-        "product_type": draft["product_type"],
-        "weight": draft.get("weight"),
-        "purity": draft.get("purity"),
-        "pricing_method": draft["pricing_method"],
-        "price": draft.get("price"),
-        "pricing_value": draft.get("pricing_value"),
-        "description": draft.get("description"),
-        "image_url": photo_url,
-        "status": "published" if is_admin else "pending",
-        "created_at": now_iso(), "updated_at": now_iso(),
-        "seller_name": "زرین ماه" if is_admin else clean(draft.get("seller_name"), 100),
-        "seller_mobile": clean(draft.get("seller_mobile"), 30) or None,
-        "weight_unit": draft.get("weight_unit", "gram"),
-        "province": draft.get("province"), "city": draft.get("city"),
-        "invoice_path": saved_invoice,
-        "published_at": now_iso() if is_admin else None,
-    }
-    rows = sb("POST", "/rest/v1/listings", payload=row, prefer="return=representation") or []
-    if not rows:
-        raise RuntimeError("ثبت آگهی در Supabase ناموفق بود.")
-    listing = rows[0]
-    cancel_flow(user)
+
+    stage = "prepare_upload"
+    listing_id = None
+    try:
+        # شناسه ثابت باعث می‌شود در تلاش مجدد، فایل عکس دوباره با نام تازه ساخته نشود.
+        token = draft.setdefault("storage_token", uuid.uuid4().hex)
+        photo_ext = "jpg"
+        invoice_ext = draft.get("invoice_ext", "pdf")
+        photo_path = f"telegram/{token}.{photo_ext}"
+        invoice_path = f"telegram/{token}.{invoice_ext}"
+
+        if not draft.get("photo_url"):
+            stage = "storage_upload_image"
+            draft["photo_url"] = upload_telegram_file(
+                draft["photo_file_id"], "listing-images", photo_path, "image/jpeg"
+            )
+
+        if not draft.get("saved_invoice_path"):
+            stage = "storage_upload_invoice"
+            invoice_mime = draft.get("invoice_mime", "application/pdf")
+            draft["saved_invoice_path"] = upload_telegram_file(
+                draft["invoice_file_id"], "listing-invoices", invoice_path, invoice_mime
+            )
+
+        stage = "prepare_database_row"
+        is_admin = str(user_id) == str(ADMIN_ID) and draft.get("kind") == "admin"
+        row = {
+            "owner_user_id": None,
+            "owner_telegram_id": str(user_id),
+            "title": clean(draft.get("title"), 150) or clean(draft.get("product_type"), 150),
+            "product_type": draft["product_type"],
+            "weight": draft.get("weight"),
+            "purity": draft.get("purity"),
+            "pricing_method": draft["pricing_method"],
+            "price": draft.get("price"),
+            "pricing_value": draft.get("pricing_value"),
+            "description": draft.get("description"),
+            "image_url": draft["photo_url"],
+            "status": "published" if is_admin else "pending",
+            "created_at": now_iso(),
+            "updated_at": now_iso(),
+            "seller_name": "زرین ماه" if is_admin else clean(draft.get("seller_name"), 100),
+            "seller_mobile": clean(draft.get("seller_mobile"), 30) or None,
+            "weight_unit": draft.get("weight_unit", "gram"),
+            "province": draft.get("province"),
+            "city": draft.get("city"),
+            "invoice_path": draft["saved_invoice_path"],
+            "published_at": now_iso() if is_admin else None,
+        }
+
+        stage = "supabase_insert_listing"
+        rows = sb("POST", "/rest/v1/listings", payload=row, prefer="return=representation") or []
+        if not rows:
+            raise RuntimeError("ثبت آگهی در Supabase ناموفق بود؛ پاسخ خالی دریافت شد.")
+        listing = rows[0]
+        listing_id = listing.get("id")
+
+        # از این نقطه آگهی در دیتابیس ثبت شده؛ دیگر خطای پیام‌رسانی نباید
+        # به کاربر بگوید آگهی ثبت نشده یا او را به ارسال دوباره فاکتور هدایت کند.
+        cancel_flow(user)
+        logger.info("LISTING_DATABASE_INSERT_OK listing_id=%s user_id=%s", listing_id, user_id)
+
+    except Exception:
+        logger.exception(
+            "LISTING_FINISH_FAILED stage=%s user_id=%s", stage, user_id
+        )
+        raise
+
     if is_admin:
         try:
+            stage = "admin_publish"
             publish_listing(listing)
             send_message(chat_id, f"✅ محصول مدیر با شناسه {listing['id']} در کانال و گروه منتشر شد.", main_keyboard(True))
-        except Exception as exc:
-            print("ADMIN PRODUCT PUBLISH FAILED:", str(exc)[:300])
-            send_message(chat_id, f"محصول با شناسه {listing['id']} در پایگاه داده ثبت شد، اما انتشار کامل نشد. از ثبت دوباره خودداری کن و گزارش Vercel را بررسی کن.", main_keyboard(True))
+        except Exception:
+            logger.exception("ADMIN_PRODUCT_POST_INSERT_FAILED listing_id=%s", listing_id)
+            try:
+                send_message(
+                    chat_id,
+                    f"محصول با شناسه {listing['id']} در پایگاه داده ثبت شد، اما انتشار کامل نشد. از ثبت دوباره خودداری کن و گزارش Vercel را بررسی کن.",
+                    main_keyboard(True),
+                )
+            except Exception:
+                logger.exception("ADMIN_PRODUCT_RESULT_MESSAGE_FAILED listing_id=%s", listing_id)
     else:
-        notified = True
         try:
+            stage = "admin_notify"
             notify_admin_pending(listing)
-        except Exception as exc:
-            notified = False
-            print("TELEGRAM LISTING ADMIN NOTIFICATION FAILED:", str(exc)[:300])
-        if notified:
-            send_message(chat_id, f"✅ آگهی شما با شناسه {listing['id']} برای بررسی مدیر ارسال شد. پس از تأیید در موضوع خریدوفروش گروه منتشر می‌شود.", main_keyboard(False))
-        else:
-            send_message(chat_id, f"آگهی با شناسه {listing['id']} در سامانه ذخیره شد، اما اطلاع‌رسانی به مدیر ناموفق بود. لطفاً آگهی را دوباره ثبت نکن و از طریق پشتیبانی پیگیری کن.", main_keyboard(False))
+            result_text = f"✅ آگهی شما با شناسه {listing['id']} برای بررسی مدیر ارسال شد. پس از تأیید در موضوع خریدوفروش گروه منتشر می‌شود."
+        except Exception:
+            logger.exception("ADMIN_PENDING_NOTIFICATION_FAILED listing_id=%s", listing_id)
+            result_text = f"آگهی شما با شناسه {listing['id']} در سامانه ذخیره شد، اما اطلاع‌رسانی به مدیر ناموفق بود. لطفاً آگهی را دوباره ثبت نکن و از طریق پشتیبانی پیگیری کن."
+        try:
+            send_message(chat_id, result_text, main_keyboard(False))
+        except Exception:
+            logger.exception("SELLER_RESULT_MESSAGE_FAILED listing_id=%s", listing_id)
 
 
 def pending_listings(chat_id):
@@ -842,8 +907,15 @@ def handle_message(state, message):
                 return
             draft["invoice_file_id"] = document["file_id"]
             draft["invoice_mime"] = mime
-            ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else ("pdf" if mime == "application/pdf" else "jpg")
-            draft["invoice_ext"] = ext if ext in ("pdf", "jpg", "jpeg", "png", "webp") else "pdf"
+            ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
+            if ext not in ("pdf", "jpg", "jpeg", "png", "webp"):
+                ext = {
+                    "application/pdf": "pdf",
+                    "image/jpeg": "jpg",
+                    "image/png": "png",
+                    "image/webp": "webp",
+                }.get(mime, "pdf")
+            draft["invoice_ext"] = ext
         elif photos:
             draft["invoice_file_id"] = photos[-1]["file_id"]
             draft["invoice_mime"] = "image/jpeg"
@@ -853,9 +925,15 @@ def handle_message(state, message):
             return
         try:
             finish_listing(state, user_id, chat_id)
-        except Exception as exc:
-            print("FINISH LISTING ERROR:", str(exc)[:350])
-            ask(chat_id, "ثبت آگهی با خطا مواجه شد. اطلاعاتت در ربات نگه داشته شده؛ دوباره فاکتور را ارسال کن یا بعداً تلاش کن.")
+        except Exception:
+            logger.exception("INVOICE_SUBMISSION_FAILED user_id=%s", user_id)
+            try:
+                ask(
+                    chat_id,
+                    "ثبت آگهی کامل نشد. اطلاعاتت در ربات نگه داشته شده است. لطفاً فعلاً آگهی جدید نساز؛ پشتیبانی باید گزارش خطای ثبت را بررسی کند. اگر مشکل موقت باشد، می‌توانی همین فاکتور را دوباره ارسال کنی.",
+                )
+            except Exception:
+                logger.exception("INVOICE_ERROR_REPLY_FAILED user_id=%s", user_id)
         return
 
 
@@ -1140,8 +1218,8 @@ class handler(BaseHTTPRequestHandler):
             state["last_update_id"] = update_id
             save_state(state, sha)
             self.respond(200, {"ok": True, "message": "OK"})
-        except Exception as exc:
-            print("WEBHOOK ERROR:", str(exc)[:500])
+        except Exception:
+            logger.exception("WEBHOOK_PROCESSING_FAILED")
             self.respond(500, {"ok": False, "error": "Webhook processing failed"})
 
     def log_message(self, fmt, *args):
