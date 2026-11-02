@@ -502,43 +502,165 @@ def notify_admin_pending(listing):
     send_message(ADMIN_ID, text, keyboard)
 
 
+
 def finish_listing(state, user_id, chat_id):
-    """ثبت آگهی؛ مرحله شکست در لاگ Vercel با traceback کامل ثبت می‌شود."""
+    """ثبت آگهی با گزارش مرحله‌ای برای تشخیص دقیق خطا."""
+
     user = get_user(state, user_id)
     draft = user.get("draft") or {}
-    if not draft.get("photo_file_id") or not draft.get("invoice_file_id"):
-        ask(chat_id, "عکس محصول و فاکتور فروش هر دو الزامی هستند.")
+
+    # ---------------------------------------------------------
+    # اعتبارسنجی اولیه
+    # ---------------------------------------------------------
+
+    required_fields = [
+        "photo_file_id",
+        "invoice_file_id",
+        "product_type",
+        "pricing_method",
+    ]
+
+    missing_fields = [
+        field for field in required_fields
+        if not draft.get(field)
+    ]
+
+    if missing_fields:
+        logger.error(
+            "LISTING_VALIDATION_FAILED user_id=%s missing_fields=%s draft_keys=%s",
+            user_id,
+            missing_fields,
+            list(draft.keys()),
+        )
+        ask(
+            chat_id,
+            "اطلاعات آگهی کامل نیست. لطفاً فرایند ثبت آگهی را دوباره آغاز کن."
+        )
         return
 
-    stage = "prepare_upload"
+    stage = "initialization"
     listing_id = None
+    is_admin = False
+    listing = None
+
     try:
-        # شناسه ثابت باعث می‌شود در تلاش مجدد، فایل عکس دوباره با نام تازه ساخته نشود.
-        token = draft.setdefault("storage_token", uuid.uuid4().hex)
+        logger.info(
+            "LISTING_FINISH_STARTED user_id=%s draft_keys=%s",
+            user_id,
+            list(draft.keys()),
+        )
+
+        # -----------------------------------------------------
+        # آماده‌سازی مسیر فایل‌ها
+        # -----------------------------------------------------
+
+        stage = "prepare_upload"
+
+        token = draft.setdefault(
+            "storage_token",
+            uuid.uuid4().hex
+        )
+
         photo_ext = "jpg"
         invoice_ext = draft.get("invoice_ext", "pdf")
+
         photo_path = f"telegram/{token}.{photo_ext}"
         invoice_path = f"telegram/{token}.{invoice_ext}"
 
+        logger.info(
+            "LISTING_UPLOAD_PATHS_READY user_id=%s",
+            user_id,
+        )
+
+        # -----------------------------------------------------
+        # آپلود عکس
+        # -----------------------------------------------------
+
         if not draft.get("photo_url"):
+
             stage = "storage_upload_image"
-            draft["photo_url"] = upload_telegram_file(
-                draft["photo_file_id"], "listing-images", photo_path, "image/jpeg"
+
+            logger.info(
+                "LISTING_IMAGE_UPLOAD_STARTED user_id=%s",
+                user_id,
             )
+
+            draft["photo_url"] = upload_telegram_file(
+                draft["photo_file_id"],
+                "listing-images",
+                photo_path,
+                "image/jpeg",
+            )
+
+            logger.info(
+                "LISTING_IMAGE_UPLOAD_OK user_id=%s",
+                user_id,
+            )
+
+        else:
+            logger.info(
+                "LISTING_IMAGE_ALREADY_UPLOADED user_id=%s",
+                user_id,
+            )
+
+        # -----------------------------------------------------
+        # آپلود فاکتور
+        # -----------------------------------------------------
 
         if not draft.get("saved_invoice_path"):
+
             stage = "storage_upload_invoice"
-            invoice_mime = draft.get("invoice_mime", "application/pdf")
-            draft["saved_invoice_path"] = upload_telegram_file(
-                draft["invoice_file_id"], "listing-invoices", invoice_path, invoice_mime
+
+            invoice_mime = draft.get(
+                "invoice_mime",
+                "application/pdf",
             )
 
+            logger.info(
+                "LISTING_INVOICE_UPLOAD_STARTED user_id=%s",
+                user_id,
+            )
+
+            draft["saved_invoice_path"] = upload_telegram_file(
+                draft["invoice_file_id"],
+                "listing-invoices",
+                invoice_path,
+                invoice_mime,
+            )
+
+            logger.info(
+                "LISTING_INVOICE_UPLOAD_OK user_id=%s",
+                user_id,
+            )
+
+        else:
+            logger.info(
+                "LISTING_INVOICE_ALREADY_UPLOADED user_id=%s",
+                user_id,
+            )
+
+        # -----------------------------------------------------
+        # آماده‌سازی اطلاعات دیتابیس
+        # -----------------------------------------------------
+
         stage = "prepare_database_row"
-        is_admin = str(user_id) == str(ADMIN_ID) and draft.get("kind") == "admin"
+
+        is_admin = (
+            str(user_id) == str(ADMIN_ID)
+            and draft.get("kind") == "admin"
+        )
+
+        now = now_iso()
+
         row = {
             "owner_user_id": None,
             "owner_telegram_id": str(user_id),
-            "title": clean(draft.get("title"), 150) or clean(draft.get("product_type"), 150),
+
+            "title": (
+                clean(draft.get("title"), 150)
+                or clean(draft.get("product_type"), 150)
+            ),
+
             "product_type": draft["product_type"],
             "weight": draft.get("weight"),
             "purity": draft.get("purity"),
@@ -546,64 +668,216 @@ def finish_listing(state, user_id, chat_id):
             "price": draft.get("price"),
             "pricing_value": draft.get("pricing_value"),
             "description": draft.get("description"),
+
             "image_url": draft["photo_url"],
+
             "status": "published" if is_admin else "pending",
-            "created_at": now_iso(),
-            "updated_at": now_iso(),
-            "seller_name": "زرین ماه" if is_admin else clean(draft.get("seller_name"), 100),
-            "seller_mobile": clean(draft.get("seller_mobile"), 30) or None,
+
+            "created_at": now,
+            "updated_at": now,
+
+            "seller_name": (
+                "زرین ماه"
+                if is_admin
+                else clean(draft.get("seller_name"), 100)
+            ),
+
+            "seller_mobile": (
+                clean(draft.get("seller_mobile"), 30) or None
+            ),
+
             "weight_unit": draft.get("weight_unit", "gram"),
             "province": draft.get("province"),
             "city": draft.get("city"),
+
             "invoice_path": draft["saved_invoice_path"],
-            "published_at": now_iso() if is_admin else None,
+
+            "published_at": now if is_admin else None,
         }
 
+        logger.info(
+            "LISTING_DATABASE_ROW_READY user_id=%s "
+            "fields=%s product_type=%s pricing_method=%s "
+            "weight=%s status=%s",
+            user_id,
+            list(row.keys()),
+            row.get("product_type"),
+            row.get("pricing_method"),
+            row.get("weight"),
+            row.get("status"),
+        )
+
+        # -----------------------------------------------------
+        # ارسال درخواست به Supabase
+        # -----------------------------------------------------
+
         stage = "supabase_insert_listing"
-        rows = sb("POST", "/rest/v1/listings", payload=row, prefer="return=representation") or []
+
+        logger.info(
+            "LISTING_SUPABASE_INSERT_STARTED user_id=%s",
+            user_id,
+        )
+
+        rows = sb(
+            "POST",
+            "/rest/v1/listings",
+            payload=row,
+            prefer="return=representation",
+        )
+
+        logger.info(
+            "LISTING_SUPABASE_INSERT_RESPONSE user_id=%s "
+            "response_type=%s response_is_none=%s",
+            user_id,
+            type(rows).__name__,
+            rows is None,
+        )
+
         if not rows:
-            raise RuntimeError("ثبت آگهی در Supabase ناموفق بود؛ پاسخ خالی دریافت شد.")
+            raise RuntimeError(
+                "ثبت آگهی در Supabase ناموفق بود؛ پاسخ خالی دریافت شد."
+            )
+
+        if not isinstance(rows, list):
+            raise RuntimeError(
+                "پاسخ Supabase از نوع مورد انتظار نیست: "
+                + type(rows).__name__
+            )
+
+        if not rows or not isinstance(rows[0], dict):
+            raise RuntimeError(
+                "پاسخ Supabase شامل اطلاعات معتبر آگهی نیست."
+            )
+
         listing = rows[0]
         listing_id = listing.get("id")
 
-        # از این نقطه آگهی در دیتابیس ثبت شده؛ دیگر خطای پیام‌رسانی نباید
-        # به کاربر بگوید آگهی ثبت نشده یا او را به ارسال دوباره فاکتور هدایت کند.
+        if listing_id is None:
+            raise RuntimeError(
+                "Supabase پاسخ داده اما شناسه آگهی دریافت نشده است."
+            )
+
+        logger.info(
+            "LISTING_DATABASE_INSERT_OK listing_id=%s user_id=%s",
+            listing_id,
+            user_id,
+        )
+
+        # -----------------------------------------------------
+        # ثبت موفق؛ پاک کردن فرایند ثبت
+        # -----------------------------------------------------
+
+        stage = "cancel_flow"
+
         cancel_flow(user)
-        logger.info("LISTING_DATABASE_INSERT_OK listing_id=%s user_id=%s", listing_id, user_id)
+
+        logger.info(
+            "LISTING_FLOW_CANCELLED listing_id=%s user_id=%s",
+            listing_id,
+            user_id,
+        )
 
     except Exception:
+
         logger.exception(
-            "LISTING_FINISH_FAILED stage=%s user_id=%s", stage, user_id
+            "LISTING_FINISH_FAILED stage=%s user_id=%s",
+            stage,
+            user_id,
         )
+
         raise
 
+    # ---------------------------------------------------------
+    # انتشار محصول مدیر
+    # ---------------------------------------------------------
+
     if is_admin:
+
         try:
             stage = "admin_publish"
+
+            logger.info(
+                "ADMIN_LISTING_PUBLISH_STARTED listing_id=%s",
+                listing_id,
+            )
+
             publish_listing(listing)
-            send_message(chat_id, f"✅ محصول مدیر با شناسه {listing['id']} در کانال و گروه منتشر شد.", main_keyboard(True))
+
+            logger.info(
+                "ADMIN_LISTING_PUBLISH_OK listing_id=%s",
+                listing_id,
+            )
+
+            send_message(
+                chat_id,
+                f"✅ محصول مدیر با شناسه {listing_id} در کانال و گروه منتشر شد.",
+                main_keyboard(True),
+            )
+
         except Exception:
-            logger.exception("ADMIN_PRODUCT_POST_INSERT_FAILED listing_id=%s", listing_id)
+
+            logger.exception(
+                "ADMIN_PRODUCT_POST_INSERT_FAILED listing_id=%s",
+                listing_id,
+            )
+
             try:
                 send_message(
                     chat_id,
-                    f"محصول با شناسه {listing['id']} در پایگاه داده ثبت شد، اما انتشار کامل نشد. از ثبت دوباره خودداری کن و گزارش Vercel را بررسی کن.",
+                    f"محصول با شناسه {listing_id} در پایگاه داده ثبت شد، "
+                    "اما انتشار کامل نشد. از ثبت دوباره خودداری کن "
+                    "و گزارش Vercel را بررسی کن.",
                     main_keyboard(True),
                 )
+
             except Exception:
-                logger.exception("ADMIN_PRODUCT_RESULT_MESSAGE_FAILED listing_id=%s", listing_id)
+                logger.exception(
+                    "ADMIN_PRODUCT_RESULT_MESSAGE_FAILED listing_id=%s",
+                    listing_id,
+                )
+
+    # ---------------------------------------------------------
+    # اطلاع‌رسانی آگهی فروشنده
+    # ---------------------------------------------------------
+
     else:
+
         try:
             stage = "admin_notify"
+
             notify_admin_pending(listing)
-            result_text = f"✅ آگهی شما با شناسه {listing['id']} برای بررسی مدیر ارسال شد. پس از تأیید در موضوع خریدوفروش گروه منتشر می‌شود."
+
+            result_text = (
+                f"✅ آگهی شما با شناسه {listing_id} "
+                "برای بررسی مدیر ارسال شد. "
+                "پس از تأیید در موضوع خریدوفروش گروه منتشر می‌شود."
+            )
+
         except Exception:
-            logger.exception("ADMIN_PENDING_NOTIFICATION_FAILED listing_id=%s", listing_id)
-            result_text = f"آگهی شما با شناسه {listing['id']} در سامانه ذخیره شد، اما اطلاع‌رسانی به مدیر ناموفق بود. لطفاً آگهی را دوباره ثبت نکن و از طریق پشتیبانی پیگیری کن."
+
+            logger.exception(
+                "ADMIN_PENDING_NOTIFICATION_FAILED listing_id=%s",
+                listing_id,
+            )
+
+            result_text = (
+                f"آگهی شما با شناسه {listing_id} در سامانه ذخیره شد، "
+                "اما اطلاع‌رسانی به مدیر ناموفق بود. "
+                "لطفاً آگهی را دوباره ثبت نکن و از طریق پشتیبانی پیگیری کن."
+            )
+
         try:
-            send_message(chat_id, result_text, main_keyboard(False))
+            send_message(
+                chat_id,
+                result_text,
+                main_keyboard(False),
+            )
+
         except Exception:
-            logger.exception("SELLER_RESULT_MESSAGE_FAILED listing_id=%s", listing_id)
+            logger.exception(
+                "SELLER_RESULT_MESSAGE_FAILED listing_id=%s",
+                listing_id,
+            )
 
 
 def pending_listings(chat_id):
