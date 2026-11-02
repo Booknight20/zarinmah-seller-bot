@@ -33,6 +33,120 @@ GITHUB_API = (
 
 TG_API = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
 
+
+# Supabase فقط در سمت سرور استفاده می‌شود؛ کلید هرگز به مرورگر ارسال نمی‌شود.
+SUPABASE_URL = os.environ.get("SUPABASE_URL", "").rstrip("/")
+SUPABASE_SERVICE_ROLE_KEY = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "")
+SUPABASE_TIMEOUT = 25
+
+IRAN_PROVINCES = {
+    "آذربایجان شرقی", "آذربایجان غربی", "اردبیل", "اصفهان", "البرز",
+    "ایلام", "بوشهر", "تهران", "چهارمحال و بختیاری", "خراسان جنوبی",
+    "خراسان رضوی", "خراسان شمالی", "خوزستان", "زنجان", "سمنان",
+    "سیستان و بلوچستان", "فارس", "قزوین", "قم", "کردستان", "کرمان",
+    "کرمانشاه", "کهگیلویه و بویراحمد", "گلستان", "گیلان", "لرستان",
+    "مازندران", "مرکزی", "هرمزگان", "همدان", "یزد",
+}
+
+def supabase_headers(extra=None):
+    if not SUPABASE_URL or not SUPABASE_SERVICE_ROLE_KEY:
+        raise RuntimeError("تنظیمات اتصال امن Supabase در سرور کامل نیست.")
+    headers = {
+        "apikey": SUPABASE_SERVICE_ROLE_KEY,
+        "Authorization": f"Bearer {SUPABASE_SERVICE_ROLE_KEY}",
+    }
+    if extra:
+        headers.update(extra)
+    return headers
+
+def supabase_request(method, path, *, params=None, json_body=None, content=None,
+                     content_type=None, prefer=None):
+    headers = supabase_headers()
+    if json_body is not None:
+        headers["Content-Type"] = "application/json"
+    if content_type:
+        headers["Content-Type"] = content_type
+    if prefer:
+        headers["Prefer"] = prefer
+    response = requests.request(
+        method,
+        f"{SUPABASE_URL}{path}",
+        headers=headers,
+        params=params,
+        json=json_body,
+        data=content,
+        timeout=SUPABASE_TIMEOUT,
+    )
+    if not response.ok:
+        detail = ""
+        try:
+            payload = response.json()
+            detail = payload.get("message") or payload.get("hint") or payload.get("details") or ""
+        except Exception:
+            detail = response.text[:300]
+        raise RuntimeError(f"خطای Supabase ({response.status_code}): {detail}")
+    if response.status_code == 204 or not response.content:
+        return None
+    try:
+        return response.json()
+    except ValueError:
+        return None
+
+def upload_supabase_file(bucket, upload, object_path):
+    content_type = upload["content_type"]
+    supabase_request(
+        "POST",
+        f"/storage/v1/object/{bucket}/{object_path}",
+        content=upload["content"],
+        content_type=content_type,
+        prefer=None,
+    )
+    if bucket == "listing-images":
+        return f"{SUPABASE_URL}/storage/v1/object/public/{bucket}/{object_path}"
+    return object_path
+
+def delete_supabase_file(bucket, object_path):
+    if not object_path:
+        return
+    try:
+        supabase_request(
+            "DELETE",
+            f"/storage/v1/object/{bucket}",
+            json_body={"prefixes": [object_path]},
+        )
+    except Exception as exc:
+        print("SUPABASE STORAGE CLEANUP ERROR:", repr(exc))
+
+def supabase_get_listing(listing_id):
+    rows = supabase_request(
+        "GET",
+        "/rest/v1/listings",
+        params={"id": f"eq.{int(listing_id)}", "select": "*", "limit": "1"},
+    )
+    return rows[0] if rows else None
+
+def supabase_insert_listing(row):
+    rows = supabase_request(
+        "POST",
+        "/rest/v1/listings",
+        json_body=row,
+        prefer="return=representation",
+    )
+    if not rows:
+        raise RuntimeError("Supabase شناسه آگهی را برنگرداند.")
+    return rows[0]
+
+def supabase_insert_purchase(row):
+    rows = supabase_request(
+        "POST",
+        "/rest/v1/purchase_requests",
+        json_body=row,
+        prefer="return=representation",
+    )
+    if not rows:
+        raise RuntimeError("Supabase درخواست خرید را ذخیره نکرد.")
+    return rows[0]
+
 SESSION = requests.Session()
 SESSION.headers.update({
     "Accept": "application/vnd.github+json",
@@ -582,292 +696,124 @@ COIN_MAP = {
 }
 
 
-def normalize_listing(data, listing_id, photo_file_id):
+def normalize_listing(data, listing_id, photo_url, invoice_path):
+    name = clean_text(data.get("sellerName") or data.get("name"), 100)
+    phone = clean_text(data.get("sellerPhone") or data.get("phone"), 30)
+    category = clean_text(data.get("sellerItem") or data.get("product_type"), 100)
+    province = clean_text(data.get("province"), 100)
+    city = clean_text(data.get("city"), 100)
+    description = clean_text(data.get("sellerDescription") or data.get("description"), 1000)
+    weight_raw = clean_text(data.get("sellerWeight") or data.get("weight"), 40)
+    karat = clean_text(data.get("sellerKarat") or data.get("karat"), 50)
+    method = clean_text(data.get("pricingMethod") or data.get("pricing_method"), 50)
 
-    name = clean_text(
-        data.get("sellerName") or data.get("name"),
-        100
-    )
-
-    phone = clean_text(
-        data.get("sellerPhone") or data.get("phone"),
-        30
-    )
-
-    category = clean_text(
-        data.get("sellerItem") or data.get("product_type"),
-        100
-    )
-
-    city = clean_text(
-        data.get("city") or "ثبت نشده",
-        100
-    )
-
-    description = clean_text(
-        data.get("sellerDescription") or data.get("description"),
-        1000
-    )
-
-    weight = clean_text(
-        data.get("sellerWeight") or data.get("weight"),
-        40
-    )
-
-    karat = clean_text(
-        data.get("sellerKarat") or data.get("karat"),
-        50
-    )
-
-    method = clean_text(
-        data.get("pricingMethod") or data.get("pricing_method"),
-        50
-    )
-
-    if not all([
-        name,
-        phone,
-        category,
-        description
-    ]):
-
-        raise ValueError(
-            "نام، شماره تماس، دسته‌بندی و توضیحات الزامی هستند."
-        )
-
+    if not all([name, phone, category, description, province, city]):
+        raise ValueError("نام، شماره تماس، دسته‌بندی، توضیحات، استان و شهر الزامی هستند.")
     if not valid_phone(phone):
+        raise ValueError("شماره تماس واردشده معتبر نیست.")
+    if province not in IRAN_PROVINCES:
+        raise ValueError("استان انتخاب‌شده معتبر نیست.")
+    if data.get("invoiceConfirm") not in ("on", "true", "1", "yes", "بله"):
+        raise ValueError("تأیید داشتن فاکتور معتبر الزامی است.")
 
-        raise ValueError(
-            "شماره تماس واردشده معتبر نیست."
-        )
-
-    if data.get("invoiceConfirm") not in (
-        "on",
-        "true",
-        "1",
-        "yes",
-        "بله"
-    ):
-
-        raise ValueError(
-            "تأیید داشتن فاکتور معتبر الزامی است."
-        )
-
-    # زیورآلات
     if category == "jewelry":
-
-        subtype = clean_text(
-            data.get("jewelryType"),
-            100
-        )
-
-        if not subtype:
-
-            raise ValueError(
-                "نوع زیورآلات را انتخاب کنید."
-            )
-
-        product_type_key = JEWELRY_MAP.get(
-            subtype,
-            "other"
-        )
-
+        subtype = clean_text(data.get("jewelryType"), 100)
+        if subtype not in JEWELRY_MAP:
+            raise ValueError("نوع زیورآلات را انتخاب کنید.")
         product_type = subtype
         title = subtype
-        weight_unit = "گرم"
-
-    # سکه
+        product_type_key = JEWELRY_MAP[subtype]
+        weight_unit = "gram"
     elif category == "coin":
-
-        subtype = clean_text(
-            data.get("coinType"),
-            100
-        )
-
+        subtype = clean_text(data.get("coinType"), 100)
         if subtype not in COIN_MAP:
-
-            raise ValueError(
-                "نوع سکه را به‌درستی انتخاب کنید."
-            )
-
+            raise ValueError("نوع سکه را به‌درستی انتخاب کنید.")
         product_type_key, product_type = COIN_MAP[subtype]
-
         title = product_type
-        weight_unit = "گرم"
-
-    # سکه پارسیان
+        weight_unit = "gram"
     elif category == "parsian":
-
         product_type_key = "coin"
         product_type = "سکه پارسیان"
         title = "سکه پارسیان"
-
-        parsian_weight = clean_text(
-            data.get("parsianWeight"),
-            30
-        )
-
-        if (
-            not parsian_weight
-            or not parsian_weight.isdigit()
-        ):
-
-            raise ValueError(
-                "وزن سکه پارسیان را برحسب سوت وارد کنید."
-            )
-
-        weight = parsian_weight
-        weight_unit = "سوت"
-
-    # طلای آب‌شده
+        parsian_weight = clean_text(data.get("parsianWeight"), 30)
+        if not parsian_weight.isdigit() or int(parsian_weight) <= 0:
+            raise ValueError("وزن سکه پارسیان را برحسب سوت وارد کنید.")
+        weight_raw = parsian_weight
+        weight_unit = "soot"
     elif category == "melted":
-
         product_type_key = "melted_gold"
         product_type = "طلای آب‌شده"
-        title = "طلای آب‌شده"
-        weight_unit = "گرم"
-
+        title = product_type
+        weight_unit = "gram"
     else:
+        raise ValueError("دسته‌بندی انتخاب‌شده معتبر نیست.")
 
-        raise ValueError(
-            "دسته‌بندی انتخاب‌شده معتبر نیست."
-        )
-
-    if not weight:
-        weight = "ثبت نشده"
-
-    # اطلاعات قیمت
-    fixed_price = clean_text(
-        data.get("fixedPrice"),
-        50
-    )
-
-    percent = clean_text(
-        data.get("pricePercent"),
-        30
-    )
-
-    amount = clean_text(
-        data.get("priceAmount"),
-        50
-    )
-
-    price_method_map = {
-        "fixed": "fixed",
-        "percent": "above_board_percent",
-        "amount": "above_board",
-        "negotiable": "negotiable",
-    }
-
-    if method not in price_method_map:
-
-        raise ValueError(
-            "روش قیمت‌گذاری را انتخاب کنید."
-        )
-
-    price_method = price_method_map[method]
-
-    if method == "fixed":
-
-        if (
-            not fixed_price.isdigit()
-            or int(fixed_price) <= 0
-        ):
-
-            raise ValueError(
-                "قیمت ثابت معتبر وارد کنید."
-            )
-
-        price_value = fixed_price
-        price = fixed_price + " تومان"
-
-    elif method == "percent":
-
-        if not percent:
-
-            raise ValueError(
-                "درصد بالاتر از قیمت تابلو را وارد کنید."
-            )
-
+    weight = None
+    if weight_raw and weight_raw != "ثبت نشده":
         try:
-
-            if float(percent) < 0:
+            weight = float(weight_raw.replace(",", "."))
+            if weight <= 0:
                 raise ValueError()
-
         except ValueError:
+            raise ValueError("وزن واردشده معتبر نیست.")
 
-            raise ValueError(
-                "درصد قیمت‌گذاری معتبر نیست."
-            )
+    fixed_price = clean_text(data.get("fixedPrice"), 50)
+    percent = clean_text(data.get("pricePercent"), 30)
+    amount = clean_text(data.get("priceAmount"), 50)
 
-        price_value = percent
-        price = percent + " درصد بالاتر از تابلو"
+    if method not in {"fixed", "percent", "amount", "negotiable"}:
+        raise ValueError("روش قیمت‌گذاری را انتخاب کنید.")
 
+    price = None
+    pricing_value = None
+    if method == "fixed":
+        if not fixed_price.isdigit() or int(fixed_price) <= 0:
+            raise ValueError("قیمت ثابت معتبر وارد کنید.")
+        price = float(fixed_price)
+        price_label = f"{int(fixed_price):,} تومان"
+    elif method == "percent":
+        try:
+            pricing_value = float(percent)
+            if pricing_value < 0 or pricing_value > 100:
+                raise ValueError()
+        except (TypeError, ValueError):
+            raise ValueError("درصد قیمت‌گذاری باید بین صفر تا ۱۰۰ باشد.")
+        price_label = f"{pricing_value:g} درصد بالاتر از تابلو"
     elif method == "amount":
-
-        if not amount.isdigit():
-
-            raise ValueError(
-                "مبلغ بالاتر از قیمت تابلو را وارد کنید."
-            )
-
-        price_value = amount
-        price = amount + " تومان بالاتر از تابلو"
-
+        if not amount.isdigit() or int(amount) <= 0:
+            raise ValueError("مبلغ بالاتر از قیمت تابلو معتبر نیست.")
+        pricing_value = float(amount)
+        price_label = f"{int(amount):,} تومان بالاتر از تابلو"
     else:
-
-        price_value = ""
-        price = "توافقی"
+        price_label = "توافقی"
 
     return {
         "id": listing_id,
         "source": "website",
-        "owner_id": ADMIN_ID,
-        "kind": "user",
-
         "seller_name": name,
-        "contact": phone,
-
-        "product_type_key": product_type_key,
+        "seller_mobile": phone,
+        "title": title,
         "product_type": product_type,
-        "item_type": product_type,
-
-        "coin_type_key": (
-            product_type_key
-            if category == "coin"
-            else ""
-        ),
-
-        "coin_type": (
-            product_type
-            if category == "coin"
-            else ""
-        ),
-
-        "purity_key": karat,
-        "purity": karat,
-        "karat": karat,
-
         "weight": weight,
         "weight_unit": weight_unit,
-
-        "title": title,
-        "description": description,
-
-        "price_method": price_method,
-        "price_value": price_value,
+        "purity": karat or None,
         "pricing_method": method,
+        "pricing_value": pricing_value,
         "price": price,
-
-        "photo": photo_file_id,
-        "photo_url": None,
-
+        "description": description,
+        "image_url": photo_url,
+        "invoice_path": invoice_path,
+        "province": province,
         "city": city,
         "status": "pending",
-
-        "created_at": datetime.now(
-            timezone.utc
-        ).isoformat(),
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "_title": title,
+        "_price_label": price_label,
+        "_product_type_key": product_type_key,
+        "_seller_name": name,
+        "_seller_mobile": phone,
+        "_weight_label": weight_raw or "ثبت نشده",
+        "_weight_unit_label": "سوت" if weight_unit == "soot" else "گرم",
     }
 
 
@@ -917,72 +863,32 @@ def send_invoice(upload, listing_id):
 
 
 def notify_admin(listing):
-
     listing_id = listing["id"]
-
     message = (
         "🆕 <b>آگهی جدید از سایت زرین ماه</b>\n\n"
-
-        f"🆔 شماره آگهی: "
-        f"<code>{listing_id}</code>\n"
-
-        f"👤 فروشنده: "
-        f"{escape_html(listing['seller_name'])}\n"
-
-        f"📞 تماس: "
-        f"{escape_html(listing['contact'])}\n"
-
-        f"📦 نوع کالا: "
-        f"{escape_html(listing['product_type'])}\n"
-
-        f"⚖️ وزن: "
-        f"{escape_html(listing['weight'])} "
-        f"{escape_html(listing['weight_unit'])}\n"
-
-        f"🔎 عیار: "
-        f"{escape_html(listing.get('karat') or 'ثبت نشده')}\n"
-
-        f"📍 شهر: "
-        f"{escape_html(listing['city'])}\n"
-
-        f"💰 روش قیمت‌گذاری: "
-        f"{escape_html(listing['pricing_method'])}\n"
-
-        f"💵 قیمت پیشنهادی: "
-        f"{escape_html(listing['price'])}\n\n"
-
-        f"📝 توضیحات:\n"
-        f"{escape_html(listing['description'])}\n\n"
-
-        "🧾 فاکتور باید بررسی شود.\n"
+        f"🆔 شماره آگهی: <code>{listing_id}</code>\n"
+        f"👤 فروشنده: {escape_html(listing['_seller_name'])}\n"
+        f"📞 تماس: <code>{escape_html(listing['_seller_mobile'])}</code>\n"
+        f"📦 نوع کالا: {escape_html(listing['product_type'])}\n"
+        f"⚖️ وزن: {escape_html(listing['_weight_label'])} {listing['_weight_unit_label']}\n"
+        f"🔎 عیار: {escape_html(listing.get('purity') or 'ثبت نشده')}\n"
+        f"📍 استان و شهر: {escape_html(listing['province'])}، {escape_html(listing['city'])}\n"
+        f"💰 روش قیمت‌گذاری: {escape_html(listing['pricing_method'])}\n"
+        f"💵 قیمت پیشنهادی: {escape_html(listing['_price_label'])}\n\n"
+        f"📝 توضیحات:\n{escape_html(listing['description'])}\n\n"
+        "🧾 فاکتور در فضای خصوصی ذخیره شده و نسخه‌ای نیز برای بررسی مدیر ارسال می‌شود.\n"
         "⚠️ آگهی تا تأیید مدیر منتشر نمی‌شود."
     )
-
-    keyboard = {
-        "inline_keyboard": [[
-            {
-                "text": "✅ تأیید و انتشار",
-                "callback_data": f"approve:{listing_id}",
-            },
-            {
-                "text": "❌ رد آگهی",
-                "callback_data": f"reject:{listing_id}",
-            },
-        ]]
-    }
-
-    telegram_call(
-        "sendMessage",
-        data={
-            "chat_id": str(ADMIN_ID),
-            "text": message,
-            "parse_mode": "HTML",
-            "reply_markup": json.dumps(
-                keyboard,
-                ensure_ascii=False
-            ),
-        },
-    )
+    keyboard = {"inline_keyboard": [[
+        {"text": "✅ تأیید و انتشار", "callback_data": f"approve_web:{listing_id}"},
+        {"text": "❌ رد آگهی", "callback_data": f"reject_web:{listing_id}"},
+    ]]}
+    telegram_call("sendMessage", data={
+        "chat_id": str(ADMIN_ID),
+        "text": message,
+        "parse_mode": "HTML",
+        "reply_markup": json.dumps(keyboard, ensure_ascii=False),
+    })
 
 
 # =========================================================
@@ -990,118 +896,98 @@ def notify_admin(listing):
 # =========================================================
 
 def create_listing(data, uploads):
-
     photo = validate_upload(
-        uploads.get("sellerPhoto")
-        or uploads.get("photo"),
-
-        {
-            "image/jpeg",
-            "image/png",
-            "image/webp"
-        },
-
+        uploads.get("sellerPhoto") or uploads.get("photo"),
+        {"image/jpeg", "image/png", "image/webp"},
         "عکس محصول",
     )
-
     invoice = validate_upload(
-        uploads.get("sellerInvoice")
-        or uploads.get("invoice"),
-
-        {
-            "image/jpeg",
-            "image/png",
-            "image/webp",
-            "application/pdf",
-        },
-
+        uploads.get("sellerInvoice") or uploads.get("invoice"),
+        {"image/jpeg", "image/png", "application/pdf"},
         "فاکتور فروش",
     )
 
-    # ارسال عکس محصول به مدیر
-    photo_message = send_product_photo(photo)
-
-    photos = photo_message.get("photo") or []
-
-    if not photos:
-
-        raise RuntimeError(
-            "تلگرام file_id عکس محصول را برنگرداند."
-        )
-
-    photo_file_id = photos[-1]["file_id"]
-
-    # دریافت شناسه آگهی
-    state, _ = load_state()
-
-    listing_id = int(
-        state.get("next_id", 1)
+    # امضای فایل‌ها بررسی می‌شود تا صرفاً به Content-Type مرورگر اعتماد نکنیم.
+    photo_bytes = photo["content"]
+    image_signatures = (
+        photo_bytes.startswith(b"\xff\xd8\xff"),
+        photo_bytes.startswith(b"\x89PNG\r\n\x1a\n"),
+        photo_bytes.startswith(b"RIFF") and photo_bytes[8:12] == b"WEBP",
     )
+    if not any(image_signatures):
+        raise ValueError("محتوای عکس معتبر نیست.")
 
-    # تبدیل اطلاعات فرم
-    listing = normalize_listing(
-        data,
-        listing_id,
-        photo_file_id
-    )
+    invoice_bytes = invoice["content"]
+    invoice_is_pdf = invoice_bytes.startswith(b"%PDF-")
+    invoice_is_jpeg = invoice_bytes.startswith(b"\xff\xd8\xff")
+    invoice_is_png = invoice_bytes.startswith(b"\x89PNG\r\n\x1a\n")
+    if not (invoice_is_pdf or invoice_is_jpeg or invoice_is_png):
+        raise ValueError("محتوای فاکتور معتبر نیست.")
 
-    # ذخیره آگهی
-    append_listing(listing)
+    # درج موقت برای دریافت ID؛ در صورت شکست، فایل‌های آپلودشده پاک می‌شوند.
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%f")
+    safe_photo_ext = {"image/jpeg": "jpg", "image/png": "png", "image/webp": "webp"}[photo["content_type"]]
+    safe_invoice_ext = {
+        "application/pdf": "pdf", "image/jpeg": "jpg", "image/png": "png"
+    }.get(invoice["content_type"], "bin")
+    object_token = re.sub(r"[^a-zA-Z0-9_-]", "", timestamp)
+    photo_path = f"website/{object_token}.{safe_photo_ext}"
+    invoice_path = f"website/{object_token}.{safe_invoice_ext}"
 
-    # ارسال فاکتور
-    invoice_sent = False
-    invoice_error = False
-
+    uploaded_photo = False
+    uploaded_invoice = False
     try:
+        photo_url = upload_supabase_file("listing-images", photo, photo_path)
+        uploaded_photo = True
+        saved_invoice_path = upload_supabase_file("listing-invoices", invoice, invoice_path)
+        uploaded_invoice = True
 
-        send_invoice(
-            invoice,
-            listing_id
-        )
+        normalized = normalize_listing(data, None, photo_url, saved_invoice_path)
 
-        invoice_sent = True
+        # پیش از درج رکورد، ارسال عکس به تلگرام را بررسی می‌کنیم.
+        photo_message = send_product_photo(photo)
+        photos = photo_message.get("photo") or []
+        if not photos:
+            raise RuntimeError("تلگرام file_id عکس محصول را برنگرداند.")
 
-    except Exception as exc:
+        db_row = {key: value for key, value in normalized.items()
+                  if not key.startswith("_") and key != "id"}
+        inserted = supabase_insert_listing(db_row)
+        listing_id = int(inserted["id"])
 
-        print(
-            "INVOICE SEND ERROR:",
-            repr(exc)
-        )
+        invoice_sent = False
+        try:
+            send_invoice(invoice, listing_id)
+            invoice_sent = True
+        except Exception as exc:
+            print("INVOICE SEND ERROR:", repr(exc))
 
-        invoice_error = True
-
-    # اطلاع‌رسانی به مدیر
-    try:
-
-        notify_admin(listing)
-
-        notified = True
-
-    except Exception as exc:
-
-        print(
-            "ADMIN NOTIFICATION ERROR:",
-            repr(exc)
-        )
-
+        normalized["id"] = listing_id
         notified = False
+        try:
+            notify_admin(normalized)
+            notified = True
+        except Exception as exc:
+            print("ADMIN NOTIFICATION ERROR:", repr(exc))
 
-    return {
-        "id": listing_id,
-        "status": "pending",
-
-        "admin_notification_sent": notified,
-        "invoice_sent": invoice_sent,
-        "invoice_send_error": invoice_error,
-
-        "message": (
-            "آگهی ذخیره شد و در انتظار تأیید مدیر است."
-            if notified and invoice_sent
-            else
-            "آگهی ذخیره شد، اما ارسال پیام یا فاکتور به مدیر کامل نشد. "
-            "لطفاً تنظیمات ربات و دسترسی مدیر بررسی شود."
-        ),
-    }
+        return {
+            "id": listing_id,
+            "status": "pending",
+            "admin_notification_sent": notified,
+            "invoice_sent": invoice_sent,
+            "invoice_send_error": not invoice_sent,
+            "message": (
+                "آگهی در پایگاه داده ذخیره شد و در انتظار تأیید مدیر است."
+                if notified and invoice_sent else
+                "آگهی ذخیره شد، اما ارسال پیام یا فاکتور به مدیر کامل نشد. لطفاً با پشتیبانی تماس بگیرید و آگهی را دوباره ثبت نکنید."
+            ),
+        }
+    except Exception:
+        if uploaded_invoice:
+            delete_supabase_file("listing-invoices", invoice_path)
+        if uploaded_photo:
+            delete_supabase_file("listing-images", photo_path)
+        raise
 
 
 # =========================================================
@@ -1116,48 +1002,41 @@ def normalize_phone(value):
 
 
 def save_purchase_request(purchase_request):
-    """ذخیره درخواست خرید در همان state مشترک ربات و سایت."""
-    for attempt in range(MAX_ATTEMPTS):
-        state, sha = load_state()
-        state.setdefault("purchase_requests", [])
-        state.setdefault("next_purchase_request_id", 1)
+    listing = supabase_get_listing(purchase_request["listing_id"])
+    if not listing or listing.get("status") != "published" or listing.get("deleted_at"):
+        raise ValueError("این آگهی دیگر برای خرید در دسترس نیست.")
 
-        listing = next((x for x in state["listings"]
-                        if str(x.get("id")) == str(purchase_request["listing_id"])), None)
-        if not listing or listing.get("status") != "published":
-            raise ValueError("این آگهی دیگر برای خرید در دسترس نیست.")
+    buyer_phone = normalize_phone(purchase_request["buyer_phone"])
+    seller_phone = normalize_phone(listing.get("seller_mobile", ""))
+    if buyer_phone and seller_phone and buyer_phone == seller_phone:
+        raise ValueError("شماره تماس خریدار و فروشنده نمی‌تواند یکسان باشد.")
 
-        buyer_phone = normalize_phone(purchase_request["buyer_phone"])
-        seller_phone = normalize_phone(listing.get("contact", ""))
-        if buyer_phone and seller_phone and buyer_phone == seller_phone:
-            raise ValueError("شماره تماس خریدار و فروشنده نمی‌تواند یکسان باشد.")
+    # جلوگیری از ثبت درخواست تکراری فعال برای یک آگهی و شماره تماس.
+    existing = supabase_request(
+        "GET",
+        "/rest/v1/purchase_requests",
+        params={
+            "listing_id": f"eq.{int(purchase_request['listing_id'])}",
+            "buyer_mobile": f"eq.{purchase_request['buyer_phone']}",
+            "status": "in.(pending,forwarded)",
+            "select": "id",
+            "limit": "1",
+        },
+    )
+    if existing:
+        raise ValueError("درخواست قبلی شما برای این آگهی ثبت شده است.")
 
-        duplicate = next((r for r in state["purchase_requests"]
-                          if str(r.get("listing_id")) == str(purchase_request["listing_id"])
-                          and normalize_phone(r.get("buyer_phone", "")) == buyer_phone
-                          and r.get("status") in ("pending", "forwarded")), None)
-        if duplicate:
-            raise ValueError("درخواست قبلی شما برای این آگهی ثبت شده است.")
-
-        request_id = int(state["next_purchase_request_id"])
-        record = dict(purchase_request)
-        record["id"] = request_id
-        record["created_at"] = datetime.now(timezone.utc).isoformat()
-        record["status"] = "pending"
-        state["purchase_requests"].append(record)
-        state["next_purchase_request_id"] = request_id + 1
-
-        try:
-            save_state(state, sha)
-            return record, listing
-        except requests.HTTPError as exc:
-            status = exc.response.status_code if exc.response is not None else None
-            if status in (409, 422) and attempt < MAX_ATTEMPTS - 1:
-                time.sleep(0.5 * (attempt + 1))
-                continue
-            raise
-
-    raise RuntimeError("ذخیره درخواست خرید ناموفق بود.")
+    row = {
+        "listing_id": int(purchase_request["listing_id"]),
+        "buyer_user_id": None,
+        "buyer_telegram_id": None,
+        "buyer_name": purchase_request["buyer_name"],
+        "buyer_mobile": purchase_request["buyer_phone"],
+        "message": purchase_request.get("message") or "درخواست از سایت زرین ماه",
+        "status": "pending",
+    }
+    record = supabase_insert_purchase(row)
+    return record, listing
 
 
 def notify_purchase_admin(purchase_request, listing):
@@ -1167,23 +1046,20 @@ def notify_purchase_admin(purchase_request, listing):
         f"🆔 شماره درخواست: <code>{request_id}</code>\n"
         f"📦 شماره آگهی: <code>{listing.get('id')}</code>\n"
         f"💎 کالا: {escape_html(listing.get('title') or listing.get('product_type') or '')}\n"
-        f"💰 قیمت: {escape_html(listing.get('price', 'ثبت نشده'))}\n\n"
-        f"👤 نام خریدار: {escape_html(purchase_request['buyer_name'])}\n"
-        f"📞 شماره خریدار: <code>{escape_html(purchase_request['buyer_phone'])}</code>\n\n"
-        "🔒 <b>اطلاعات خصوصی فروشنده:</b>\n"
-        f"👤 {escape_html(listing.get('seller_name', 'ثبت نشده'))}\n"
-        f"📞 <code>{escape_html(listing.get('contact', 'ثبت نشده'))}</code>\n\n"
-        "برای انتقال درخواست و اطلاعات خریدار به مرحله بعد، دکمه زیر را بزنید."
+        f"💰 قیمت: {escape_html(listing.get('price') or 'توافقی')}\n\n"
+        f"👤 نام خریدار: {escape_html(purchase_request.get('buyer_name'))}\n"
+        f"📞 شماره خریدار: <code>{escape_html(purchase_request.get('buyer_mobile'))}</code>\n\n"
+        "🔒 اطلاعات فروشنده پس از بررسی درخواست از دیتابیس دریافت می‌شود."
     )
     keyboard = {"inline_keyboard": [[{
         "text": "📨 بررسی و انتقال درخواست",
-        "callback_data": f"forward:{request_id}"
+        "callback_data": f"forward_web:{request_id}",
     }]]}
     return telegram_call("sendMessage", data={
         "chat_id": str(ADMIN_ID),
         "text": message,
         "parse_mode": "HTML",
-        "reply_markup": json.dumps(keyboard, ensure_ascii=False)
+        "reply_markup": json.dumps(keyboard, ensure_ascii=False),
     })
 
 
@@ -1192,53 +1068,25 @@ def notify_purchase_admin(purchase_request, listing):
 # =========================================================
 
 def public_listing(item):
-
-    allowed = (
-        "id",
-        "product_type",
-        "item_type",
-        "weight",
-        "weight_unit",
-        "karat",
-        "city",
-        "description",
-        "pricing_method",
-        "price",
-        "created_at",
-        "status",
-    )
-
-    result = {
-        key: item[key]
-        for key in allowed
-        if key in item
+    # فقط ستون‌های عمومی برگردانده می‌شوند؛ شماره فروشنده و مسیر فاکتور محرمانه‌اند.
+    return {
+        "id": item.get("id"),
+        "product_type": item.get("product_type"),
+        "item_type": item.get("product_type"),
+        "weight": item.get("weight"),
+        "weight_unit": "سوت" if item.get("weight_unit") == "soot" else "گرم",
+        "karat": item.get("purity"),
+        "purity": item.get("purity"),
+        "province": item.get("province"),
+        "city": item.get("city"),
+        "description": item.get("description"),
+        "pricing_method": item.get("pricing_method"),
+        "pricing_value": item.get("pricing_value"),
+        "price": item.get("price"),
+        "photo_url": item.get("image_url"),
+        "created_at": item.get("created_at"),
+        "status": item.get("status"),
     }
-
-    # حفظ وضعیت واقعی آگهی
-    result["status"] = item.get(
-        "status",
-        "pending"
-    )
-
-    # ساخت آدرس عکس از روی شناسه آگهی
-    # فایل api/photo.py در مرحله بعد باید ایجاد شود.
-    if item.get("photo"):
-
-        result["photo_url"] = (
-            f"{API_BASE_URL}/api/photo"
-            f"?id={item['id']}"
-        )
-
-    elif item.get("photo_url"):
-
-        # سازگاری با آگهی‌های قدیمی که URL عکس دارند
-        result["photo_url"] = item["photo_url"]
-
-    else:
-
-        result["photo_url"] = None
-
-    return result
 
 
 # =========================================================
@@ -1256,53 +1104,27 @@ class handler(BaseHTTPRequestHandler):
         )
 
     def do_GET(self):
-
         try:
-
-            state, _ = load_state()
-
-            visible_statuses = {
-                "published",
-                "sold",
-            }
-
+            rows = supabase_request(
+                "POST",
+                "/rest/v1/rpc/get_public_listings",
+                json_body={},
+            ) or []
             published = [
                 public_listing(item)
-
-                for item in state.get("listings", [])
-
-                if item.get("status") in visible_statuses
+                for item in rows
+                if item.get("status") in {"published", "sold"}
             ]
-
-            send_json(
-                self,
-                200,
-                {
-                    "ok": True,
-                    "listings": published,
-                }
-            )
-
+            send_json(self, 200, {"ok": True, "listings": published})
         except Exception as exc:
-
-            print(
-                "GET ERROR:",
-                repr(exc)
-            )
-
-            send_json(
-                self,
-                500,
-                {
-                    "ok": False,
-                    "error": "خواندن آگهی‌ها ناموفق بود.",
-                }
-            )
+            print("GET SUPABASE ERROR:", repr(exc))
+            send_json(self, 500, {
+                "ok": False,
+                "error": "خواندن آگهی‌ها ناموفق بود. تنظیمات Supabase و تابع get_public_listings را بررسی کنید."
+            })
 
     def do_POST(self):
-
         try:
-
             data, uploads = parse_request(self)
 
             if not uploads and isinstance(data, dict) and data.get("action") == "purchase":
@@ -1321,11 +1143,9 @@ class handler(BaseHTTPRequestHandler):
                 purchase_request, listing = save_purchase_request({
                     "source": "website",
                     "listing_id": listing_id,
-                    "buyer_type": "website",
                     "buyer_name": buyer_name,
                     "buyer_phone": buyer_phone,
                 })
-
                 notified = True
                 try:
                     notify_purchase_admin(purchase_request, listing)
@@ -1345,73 +1165,26 @@ class handler(BaseHTTPRequestHandler):
                 })
                 return
 
-            result = create_listing(
-                data,
-                uploads
-            )
+            result = create_listing(data, uploads)
+            send_json(self, 201 if result["admin_notification_sent"] else 202, {
+                "ok": True,
+                **result,
+            })
 
-            send_json(
-                self,
-                201 if result["admin_notification_sent"] else 202,
-                {
-                    "ok": True,
-                    **result
-                }
-            )
-
-        except (
-            UnicodeDecodeError,
-            json.JSONDecodeError
-        ) as exc:
-
-            print(
-                "REQUEST DECODE ERROR:",
-                repr(exc)
-            )
-
-            send_json(
-                self,
-                400,
-                {
-                    "ok": False,
-                    "error": "اطلاعات ارسالی معتبر نیست.",
-                }
-            )
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            print("REQUEST DECODE ERROR:", repr(exc))
+            send_json(self, 400, {"ok": False, "error": "اطلاعات ارسالی معتبر نیست."})
 
         except ValueError as exc:
-
-            print(
-                "VALIDATION ERROR:",
-                repr(exc)
-            )
-
-            send_json(
-                self,
-                400,
-                {
-                    "ok": False,
-                    "error": str(exc),
-                }
-            )
+            print("VALIDATION ERROR:", repr(exc))
+            send_json(self, 400, {"ok": False, "error": str(exc)})
 
         except Exception as exc:
-
-            print(
-                "POST ERROR:",
-                repr(exc)
-            )
-
-            send_json(
-                self,
-                500,
-                {
-                    "ok": False,
-                    "error": (
-                        "ثبت آگهی با خطا مواجه شد. "
-                        "توکن‌های سرور، دسترسی ربات و مخزن داده را بررسی کنید."
-                    ),
-                }
-            )
+            print("POST ERROR:", repr(exc))
+            send_json(self, 500, {
+                "ok": False,
+                "error": "عملیات با خطا مواجه شد. تنظیمات Supabase، دسترسی ربات و گزارش‌های Vercel را بررسی کنید."
+            })
 
     def log_message(self, format, *args):
 
