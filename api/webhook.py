@@ -47,6 +47,22 @@ COINS = {
     "سکه یک گرمی بانک مرکزی": "سکه یک گرمی بانک مرکزی", "سایر سکه‌ها": "سایر سکه‌ها",
 }
 
+# فهرست ۱۴۸۱ شهر واقعی ایران؛ داده‌ها بر اساس تقسیمات کشوری تا پایان ۱۴۰۴.
+# در صورت در دسترس نبودن منبع، امکان ورود دستی شهر نیز حفظ شده است.
+CITY_DATA_URL = "https://raw.githubusercontent.com/sajaddp/list-of-cities-in-Iran/main/dist/json/cities-filtered.json"
+PROVINCE_ID_BY_NAME = {
+    "مرکزی": 100, "گیلان": 101, "مازندران": 102, "آذربایجان شرقی": 103,
+    "آذربایجان غربی": 104, "کرمانشاه": 105, "خوزستان": 106, "فارس": 107,
+    "کرمان": 108, "خراسان رضوی": 109, "اصفهان": 110, "سیستان و بلوچستان": 111,
+    "کردستان": 112, "همدان": 113, "چهارمحال و بختیاری": 114, "لرستان": 115,
+    "ایلام": 116, "کهگیلویه و بویراحمد": 117, "بوشهر": 118, "زنجان": 119,
+    "سمنان": 120, "یزد": 121, "هرمزگان": 122, "تهران": 123, "اردبیل": 124,
+    "قم": 125, "قزوین": 126, "گلستان": 127, "خراسان شمالی": 128,
+    "خراسان جنوبی": 129, "البرز": 130,
+}
+CITY_PAGE_SIZE = 20
+_CITY_DATA_CACHE = None
+
 
 def now_iso():
     return datetime.now(timezone.utc).isoformat()
@@ -222,19 +238,117 @@ def start_listing(chat_id, user, kind):
 
 
 def ask_category(chat_id):
-    keyboard = {"keyboard": [[{"text": "زیورآلات طلا"}, {"text": "سکه"}], [{"text": "سکه پارسیان"}, {"text": "طلای آب‌شده"}], [{"text": "/cancel"}]], "resize_keyboard": True, "one_time_keyboard": True}
-    ask(chat_id, "دسته‌بندی محصول را انتخاب کن:", keyboard)
+    keyboard = {
+        "keyboard": [
+            [{"text": "زیورآلات طلا"}, {"text": "سکه"}],
+            [{"text": "سکه پارسیان"}, {"text": "طلای آب‌شده"}],
+            [{"text": "/cancel"}],
+        ],
+        "resize_keyboard": True,
+        "one_time_keyboard": False,
+        "is_persistent": True,
+    }
+    ask(chat_id, "دسته‌بندی محصول را از دکمه‌های زیر انتخاب کن:", keyboard)
+
+
+def ask_subtype(chat_id, category):
+    options = list(JEWELRY.keys()) if category == "jewelry" else list(COINS.keys())
+    rows = [[{"text": value}] for value in options]
+    rows.append([{"text": "/cancel"}])
+    ask(chat_id, "نوع محصول را از گزینه‌های زیر انتخاب کن:", {
+        "keyboard": rows, "resize_keyboard": True,
+        "one_time_keyboard": False, "is_persistent": True,
+    })
+
+
+def ask_purity(chat_id):
+    rows = [
+        [{"text": "۱۸ عیار"}, {"text": "۲۱ عیار"}],
+        [{"text": "۲۲ عیار"}, {"text": "۲۴ عیار"}],
+        [{"text": "۹۰۰ از ۱۰۰۰ (سکه)"}, {"text": "نیازمند بررسی"}],
+        [{"text": "ورود دستی عیار"}],
+        [{"text": "/cancel"}],
+    ]
+    ask(chat_id, "عیار محصول را انتخاب کن:", {
+        "keyboard": rows, "resize_keyboard": True,
+        "one_time_keyboard": False, "is_persistent": True,
+    })
+
+
+def load_city_records():
+    global _CITY_DATA_CACHE
+    if _CITY_DATA_CACHE is not None:
+        return _CITY_DATA_CACHE
+    response = requests.get(CITY_DATA_URL, timeout=20)
+    response.raise_for_status()
+    records = response.json()
+    if not isinstance(records, list) or not records:
+        raise RuntimeError("فهرست شهرها معتبر نیست.")
+    _CITY_DATA_CACHE = records
+    return records
+
+
+def get_cities_for_province(province):
+    province_id = PROVINCE_ID_BY_NAME.get(province)
+    if province_id is None:
+        raise ValueError("استان انتخاب‌شده در فهرست شهرها موجود نیست.")
+    records = load_city_records()
+    names = sorted({
+        clean(item.get("name"), 80)
+        for item in records
+        if isinstance(item, dict) and int(item.get("province_id", -1)) == province_id and item.get("name")
+    })
+    if not names:
+        raise RuntimeError("برای استان انتخاب‌شده شهری پیدا نشد.")
+    return names
+
+
+def city_keyboard(cities, page):
+    total_pages = max(1, (len(cities) + CITY_PAGE_SIZE - 1) // CITY_PAGE_SIZE)
+    page = max(0, min(int(page), total_pages - 1))
+    start = page * CITY_PAGE_SIZE
+    chunk = cities[start:start + CITY_PAGE_SIZE]
+    rows = []
+    for i in range(0, len(chunk), 2):
+        row = []
+        for offset, city in enumerate(chunk[i:i + 2]):
+            index = start + i + offset
+            row.append({"text": city, "callback_data": f"citysel:{index}"})
+        rows.append(row)
+    nav = []
+    if page > 0:
+        nav.append({"text": "⬅️ قبلی", "callback_data": f"citypage:{page - 1}"})
+    nav.append({"text": f"{page + 1}/{total_pages}", "callback_data": "citynoop"})
+    if page + 1 < total_pages:
+        nav.append({"text": "بعدی ➡️", "callback_data": f"citypage:{page + 1}"})
+    rows.append(nav)
+    rows.append([{"text": "✍️ ورود دستی نام شهر", "callback_data": "citymanual"}])
+    return {"inline_keyboard": rows}
+
+
+def ask_city_page(chat_id, province, page=0, message_id=None):
+    cities = get_cities_for_province(province)
+    markup = city_keyboard(cities, page)
+    text = f"📍 شهر محل فروش در استان {esc(province)} را انتخاب کن.\nتعداد شهرهای ثبت‌شده: {len(cities)}"
+    if message_id:
+        telegram("editMessageText", {
+            "chat_id": chat_id, "message_id": message_id,
+            "text": text, "parse_mode": "HTML", "reply_markup": markup,
+        })
+    else:
+        send_message(chat_id, "استان انتخاب شد؛ حالا شهر را از فهرست انتخاب کن.", {"remove_keyboard": True})
+        send_message(chat_id, text, markup)
 
 
 def ask_pricing(chat_id):
-    keyboard = {"keyboard": [[{"text": "قیمت ثابت"}, {"text": "درصد بالاتر از تابلو"}], [{"text": "مبلغ ثابت بالاتر از تابلو"}, {"text": "توافقی"}], [{"text": "/cancel"}]], "resize_keyboard": True, "one_time_keyboard": True}
+    keyboard = {"keyboard": [[{"text": "قیمت ثابت"}, {"text": "درصد بالاتر از تابلو"}], [{"text": "مبلغ ثابت بالاتر از تابلو"}, {"text": "توافقی"}], [{"text": "/cancel"}]], "resize_keyboard": True, "one_time_keyboard": False, "is_persistent": True}
     ask(chat_id, "روش قیمت‌گذاری را انتخاب کن:", keyboard)
 
 
 def ask_province(chat_id):
     rows = [[{"text": province}] for province in PROVINCES]
     rows.append([{"text": "/cancel"}])
-    ask(chat_id, "استان محل فروش را انتخاب کن:", {"keyboard": rows, "resize_keyboard": True, "one_time_keyboard": True})
+    ask(chat_id, "استان محل فروش را از فهرست زیر انتخاب کن:", {"keyboard": rows, "resize_keyboard": True, "one_time_keyboard": False, "is_persistent": True})
 
 
 def get_telegram_file(file_id):
@@ -537,10 +651,10 @@ def handle_message(state, message):
         draft["category"] = category
         if category == "jewelry":
             user["flow"] = "subtype"
-            ask(chat_id, "نوع زیورآلات را دقیق بنویس:\n" + "، ".join(JEWELRY.keys()))
+            ask_subtype(chat_id, category)
         elif category == "coin":
             user["flow"] = "subtype"
-            ask(chat_id, "نوع سکه را انتخاب کن:\n" + "، ".join(COINS.keys()))
+            ask_subtype(chat_id, category)
         elif category == "parsian":
             draft["product_type"] = "سکه پارسیان"
             draft["weight_unit"] = "soot"
@@ -580,11 +694,28 @@ def handle_message(state, message):
                 return
             draft["weight"] = int(value) if value.is_integer() else value
         user["flow"] = "purity"
-        ask(chat_id, "عیار محصول را بنویس؛ مثلاً ۱۸ عیار، ۲۴ عیار یا «نیازمند بررسی».")
+        ask_purity(chat_id)
         return
 
     if flow == "purity":
-        draft["purity"] = text[:60] if text else "نیازمند بررسی"
+        allowed_purities = {"۱۸ عیار", "۲۱ عیار", "۲۲ عیار", "۲۴ عیار", "۹۰۰ از ۱۰۰۰ (سکه)", "نیازمند بررسی"}
+        if text == "ورود دستی عیار":
+            user["flow"] = "purity_custom"
+            ask(chat_id, "عیار را به‌صورت متنی وارد کن؛ مثال: ۷۵۰ یا ۱۸ عیار.")
+            return
+        if text not in allowed_purities:
+            ask_purity(chat_id)
+            return
+        draft["purity"] = text
+        user["flow"] = "description"
+        ask(chat_id, "توضیحات محصول را بفرست؛ وضعیت، اجرت و جزئیات مهم را بنویس.")
+        return
+
+    if flow == "purity_custom":
+        if not text or len(text) > 60:
+            ask(chat_id, "عیار معتبر وارد کن (حداکثر ۶۰ نویسه).")
+            return
+        draft["purity"] = text
         user["flow"] = "description"
         ask(chat_id, "توضیحات محصول را بفرست؛ وضعیت، اجرت و جزئیات مهم را بنویس.")
         return
@@ -648,10 +779,15 @@ def handle_message(state, message):
             return
         draft["province"] = text
         user["flow"] = "city"
-        ask(chat_id, "نام شهر محل فروش را بنویس.")
+        try:
+            ask_city_page(chat_id, text, 0)
+        except Exception as exc:
+            print("CITY DATA LOAD ERROR:", str(exc)[:250])
+            user["flow"] = "city_manual"
+            ask(chat_id, "فهرست شهرها موقتاً در دسترس نیست. نام شهر محل فروش را وارد کن.")
         return
 
-    if flow == "city":
+    if flow == "city_manual":
         if len(text) < 2:
             ask(chat_id, "نام شهر معتبر وارد کن.")
             return
@@ -660,7 +796,7 @@ def handle_message(state, message):
             draft["seller_name"] = "زرین ماه"
             draft["seller_mobile"] = None
             user["flow"] = "photo"
-            ask(chat_id, "عکس محصول را ارسال کن.")
+            ask(chat_id, "📷 عکس محصول را ارسال کن. از علامت سنجاق/پیوست کنار کادر پیام، عکس را از گالری انتخاب کن. ارسال عکس الزامی است.")
         else:
             user["flow"] = "seller_name"
             ask(chat_id, "نام و نام خانوادگی فروشنده را بفرست.")
@@ -682,13 +818,13 @@ def handle_message(state, message):
             return
         draft["seller_mobile"] = mobile
         user["flow"] = "photo"
-        ask(chat_id, "عکس محصول را ارسال کن. عکس برای نمایش آگهی استفاده می‌شود.")
+        ask(chat_id, "📷 عکس محصول را ارسال کن. از علامت سنجاق/پیوست کنار کادر پیام، عکس را از گالری انتخاب کن. عکس برای نمایش آگهی الزامی است.")
         return
 
     if flow == "photo":
         photos = message.get("photo") or []
         if not photos:
-            ask(chat_id, "لطفاً عکس محصول را به‌صورت عکس ارسال کن.")
+            ask(chat_id, "لطفاً خودِ عکس را با گزینه گالری/پیوست تلگرام ارسال کن؛ پیام متنی یا فایل PDF به‌جای عکس محصول پذیرفته نمی‌شود.")
             return
         draft["photo_file_id"] = photos[-1]["file_id"]
         user["flow"] = "invoice"
@@ -837,13 +973,71 @@ def edit_listing_messages(listing, sold=False, disabled=False, restore=False):
             telegram("editMessageReplyMarkup", {"chat_id": chat_id, "message_id": message_id, "reply_markup": purchase_keyboard(listing["id"])})
 
 
-def handle_callback(callback):
+def handle_callback(callback, state):
     callback_id = callback["id"]
     user_id = callback["from"]["id"]
     data = callback.get("data", "")
 
     def answer(message, alert=False):
         telegram("answerCallbackQuery", {"callback_query_id": callback_id, "text": message, "show_alert": alert})
+
+    # انتخاب شهر با صفحه‌بندی؛ دکمه‌های شهر فقط در مرحله انتخاب شهر فعال‌اند.
+    if data == "citynoop":
+        answer("برای دیدن شهرها از دکمه‌های شهر استفاده کن.")
+        return
+    if data == "citymanual":
+        user = get_user(state, user_id)
+        if user.get("flow") != "city":
+            answer("این مرحله دیگر فعال نیست.", True)
+            return
+        user["flow"] = "city_manual"
+        answer("ورود دستی شهر فعال شد.")
+        send_message(callback["message"]["chat"]["id"], "نام شهر محل فروش را بنویس:")
+        return
+    if data.startswith("citypage:"):
+        user = get_user(state, user_id)
+        if user.get("flow") != "city":
+            answer("این مرحله دیگر فعال نیست.", True)
+            return
+        try:
+            page = int(data.split(":", 1)[1])
+            province = (user.get("draft") or {}).get("province")
+            ask_city_page(callback["message"]["chat"]["id"], province, page, callback["message"]["message_id"])
+            answer("فهرست شهرها به‌روزرسانی شد.")
+        except Exception as exc:
+            print("CITY PAGE ERROR:", str(exc)[:250])
+            answer("بارگذاری شهرها ناموفق بود. نام شهر را دستی وارد کن.", True)
+            user["flow"] = "city_manual"
+            send_message(callback["message"]["chat"]["id"], "نام شهر محل فروش را بنویس:")
+        return
+    if data.startswith("citysel:"):
+        user = get_user(state, user_id)
+        if user.get("flow") != "city":
+            answer("این مرحله دیگر فعال نیست.", True)
+            return
+        try:
+            index = int(data.split(":", 1)[1])
+            draft = user.get("draft") or {}
+            province = draft.get("province")
+            cities = get_cities_for_province(province)
+            if index < 0 or index >= len(cities):
+                raise ValueError("invalid city index")
+            draft["city"] = cities[index]
+            chat_id = callback["message"]["chat"]["id"]
+            telegram("editMessageReplyMarkup", {"chat_id": chat_id, "message_id": callback["message"]["message_id"], "reply_markup": {"inline_keyboard": []}})
+            if draft.get("kind") == "admin":
+                draft["seller_name"] = "زرین ماه"
+                draft["seller_mobile"] = None
+                user["flow"] = "photo"
+                send_message(chat_id, "📷 حالا عکس محصول را ارسال کن. از علامت سنجاق/پیوست کنار کادر پیام، عکس را از گالری انتخاب کن. ارسال عکس الزامی است.")
+            else:
+                user["flow"] = "seller_name"
+                send_message(chat_id, "نام و نام خانوادگی فروشنده را بفرست.")
+            answer("شهر انتخاب شد: " + cities[index])
+        except Exception as exc:
+            print("CITY SELECT ERROR:", str(exc)[:250])
+            answer("انتخاب شهر ناموفق بود؛ دوباره تلاش کن.", True)
+        return
 
     if data.startswith("buy:"):
         try:
@@ -940,7 +1134,7 @@ class handler(BaseHTTPRequestHandler):
                 self.respond(200, {"ok": True, "message": "Duplicate update ignored"})
                 return
             if "callback_query" in update:
-                handle_callback(update["callback_query"])
+                handle_callback(update["callback_query"], state)
             elif "message" in update:
                 handle_message(state, update["message"])
             state["last_update_id"] = update_id
