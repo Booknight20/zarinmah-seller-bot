@@ -535,8 +535,22 @@ class handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         try:
-            rows = sb_request("POST", "/rest/v1/rpc/get_public_listings", payload={}) or []
-            listings = [public_listing(row) for row in rows if row.get("status") in ("published", "sold") and not row.get("deleted_at")]
+            # Read directly from listings so deleted_at filtering does not depend on an old RPC.
+            rows = sb_request(
+                "GET",
+                "/rest/v1/listings",
+                params={
+                    "select": "id,title,product_type,weight,weight_unit,purity,province,city,description,pricing_method,pricing_value,price,image_url,created_at,status,deleted_at",
+                    "status": "in.(published,sold)",
+                    "deleted_at": "is.null",
+                    "order": "created_at.desc",
+                },
+            ) or []
+            listings = [
+                public_listing(row)
+                for row in rows
+                if row.get("status") in ("published", "sold") and row.get("deleted_at") is None
+            ]
             respond(self, 200, {"ok": True, "listings": listings})
         except Exception as exc:
             print("PUBLIC LISTINGS ERROR:", str(exc)[:300])
