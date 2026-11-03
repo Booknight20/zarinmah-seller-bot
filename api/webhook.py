@@ -49,7 +49,9 @@ JEWELRY = {
 COINS = {
     "تمام سکه امامی": "سکه تمام امامی", "تمام سکه بهار آزادی": "سکه تمام بهار آزادی",
     "نیم سکه": "نیم‌سکه", "ربع سکه": "ربع‌سکه",
-    "سکه یک گرمی بانک مرکزی": "سکه یک گرمی بانک مرکزی", "سایر سکه‌ها": "سایر سکه‌ها",
+    "سکه یک گرمی بانک مرکزی": "سکه یک گرمی بانک مرکزی",
+    "سکه پارسیان": "سکه پارسیان", "سایر سکه‌ها": "سایر سکه‌ها",
+}
 }
 
 # فهرست ۱۴۸۱ شهر واقعی ایران؛ داده‌ها بر اساس تقسیمات کشوری تا پایان ۱۴۰۴.
@@ -237,9 +239,11 @@ def ask(chat_id, text, keyboard=None):
 
 
 def start_listing(chat_id, user, kind):
-    user["flow"] = "title"
+    user["flow"] = "category"
     user["draft"] = {"kind": kind, "photo_file_id": None, "invoice_file_id": None}
-    ask(chat_id, "📝 <b>ثبت آگهی زرین ماه</b>\n\nمرحله ۱: عنوان محصول را بفرست.\nمثال: انگشتر طلای ۱۸ عیار\n\nبرای لغو هر زمان /cancel را بفرست.")
+    ask(chat_id, "📝 <b>ثبت آگهی زرین ماه</b>\n\nدسته‌بندی محصول را انتخاب کن. عنوان آگهی پس از دریافت مشخصات کالا به‌صورت خودکار ساخته می‌شود.\nبرای لغو هر زمان /cancel را بفرست.")
+    ask_category(chat_id)
+
 
 
 def ask_category(chat_id):
@@ -293,19 +297,47 @@ def load_city_records():
     return records
 
 
+MAIN_CITIES_BY_PROVINCE = {
+    "آذربایجان شرقی": ["تبریز", "مراغه", "مرند", "میانه", "اهر", "بناب"],
+    "آذربایجان غربی": ["ارومیه", "خوی", "میاندوآب", "مهاباد", "بوکان", "سلماس"],
+    "اردبیل": ["اردبیل", "پارس‌آباد", "مشگین‌شهر", "خلخال", "گرمی"],
+    "اصفهان": ["اصفهان", "کاشان", "خمینی‌شهر", "نجف‌آباد", "شاهین‌شهر", "فولادشهر", "فلاورجان"],
+    "البرز": ["کرج", "فردیس", "نظرآباد", "محمدشهر", "ماهدشت", "هشتگرد"],
+    "ایلام": ["ایلام", "دهلران", "آبدانان", "ایوان", "دره‌شهر"],
+    "بوشهر": ["بوشهر", "برازجان", "گناوه", "کنگان", "جم", "دیر"],
+    "تهران": ["تهران", "شهریار", "اسلام‌شهر", "قدس", "ملارد", "پاکدشت", "رباط‌کریم", "ورامین", "دماوند"],
+    "چهارمحال و بختیاری": ["شهرکرد", "بروجن", "فارسان", "لردگان", "فرخ‌شهر"],
+    "خراسان جنوبی": ["بیرجند", "قائن", "طبس", "فردوس", "نهبندان"],
+    "خراسان رضوی": ["مشهد", "نیشابور", "سبزوار", "تربت حیدریه", "کاشمر", "قوچان", "تربت جام"],
+    "خراسان شمالی": ["بجنورد", "شیروان", "اسفراین", "جاجرم", "آشخانه"],
+    "خوزستان": ["اهواز", "آبادان", "خرمشهر", "دزفول", "ماهشهر", "بهبهان", "اندیمشک", "ایذه"],
+    "زنجان": ["زنجان", "ابهر", "خرمدره", "قیدار", "ماه‌نشان"],
+    "سمنان": ["سمنان", "شاهرود", "دامغان", "گرمسار", "مهدی‌شهر"],
+    "سیستان و بلوچستان": ["زاهدان", "زابل", "چابهار", "ایرانشهر", "خاش", "سراوان"],
+    "فارس": ["شیراز", "مرودشت", "کازرون", "جهرم", "فسا", "لار", "داراب", "آباده"],
+    "قزوین": ["قزوین", "تاکستان", "الوند", "آبیک", "بوئین‌زهرا"],
+    "قم": ["قم", "جعفریه", "دستجرد", "سلفچگان"],
+    "کردستان": ["سنندج", "سقز", "مریوان", "بانه", "قروه", "کامیاران"],
+    "کرمان": ["کرمان", "رفسنجان", "سیرجان", "جیرفت", "بم", "زرند", "کهنوج"],
+    "کرمانشاه": ["کرمانشاه", "اسلام‌آباد غرب", "کنگاور", "هرسین", "جوانرود", "سنقر"],
+    "کهگیلویه و بویراحمد": ["یاسوج", "دوگنبدان", "دهدشت", "لیکک", "سی‌سخت"],
+    "گلستان": ["گرگان", "گنبد کاووس", "علی‌آباد کتول", "آق‌قلا", "بندرترکمن", "مینودشت"],
+    "گیلان": ["رشت", "بندر انزلی", "لاهیجان", "لنگرود", "آستارا", "تالش", "رودسر"],
+    "لرستان": ["خرم‌آباد", "بروجرد", "دورود", "الیگودرز", "ازنا", "کوهدشت", "نورآباد"],
+    "مازندران": ["ساری", "بابل", "آمل", "قائم‌شهر", "نوشهر", "چالوس", "بابلسر", "تنکابن"],
+    "مرکزی": ["اراک", "ساوه", "خمین", "محلات", "دلیجان", "شازند"],
+    "هرمزگان": ["بندرعباس", "میناب", "قشم", "بندر لنگه", "جاسک", "کیش"],
+    "همدان": ["همدان", "ملایر", "نهاوند", "تویسرکان", "کبودرآهنگ", "اسدآباد"],
+    "یزد": ["یزد", "میبد", "اردکان", "بافق", "مهریز", "ابرکوه"],
+}
+
+
 def get_cities_for_province(province):
-    province_id = PROVINCE_ID_BY_NAME.get(province)
-    if province_id is None:
-        raise ValueError("استان انتخاب‌شده در فهرست شهرها موجود نیست.")
-    records = load_city_records()
-    names = sorted({
-        clean(item.get("name"), 80)
-        for item in records
-        if isinstance(item, dict) and int(item.get("province_id", -1)) == province_id and item.get("name")
-    })
-    if not names:
-        raise RuntimeError("برای استان انتخاب‌شده شهری پیدا نشد.")
-    return names
+    cities = MAIN_CITIES_BY_PROVINCE.get(province)
+    if not cities:
+        raise ValueError("فهرست شهرهای اصلی استان موجود نیست.")
+    return cities
+
 
 
 def city_keyboard(cities, page):
@@ -401,20 +433,7 @@ def send_invoice_to_admin(listing):
         send_message(ADMIN_ID, f"برای آگهی شماره {listing.get('id')} فاکتوری ثبت نشده است.")
         return
 
-    encoded = "/".join(quote(part, safe="") for part in invoice_path.split("/"))
-    signed = sb(
-        "POST",
-        f"/storage/v1/object/sign/listing-invoices/{encoded}",
-        payload={"expiresIn": 120},
-    ) or {}
-    signed_path = signed.get("signedURL") or signed.get("signedUrl")
-    if not signed_path:
-        raise RuntimeError("لینک موقت فاکتور از فضای ذخیره‌سازی دریافت نشد.")
-
-    signed_url = signed_path if signed_path.startswith("http") else f"{SUPABASE_URL}{signed_path if signed_path.startswith('/') else '/' + signed_path}"
-    response = requests.get(signed_url, timeout=45)
-    response.raise_for_status()
-    content = response.content
+invoice
     if not content:
         raise RuntimeError("فایل فاکتور خالی است.")
     if len(content) > 10 * 1024 * 1024:
@@ -706,10 +725,7 @@ def finish_listing(state, user_id, chat_id):
             "owner_user_id": None,
             "owner_telegram_id": str(user_id),
 
-            "title": (
-                clean(draft.get("title"), 150)
-                or clean(draft.get("product_type"), 150)
-            ),
+title
 
             "product_type": draft["product_type"],
             "weight": draft.get("weight"),
@@ -1033,10 +1049,7 @@ def handle_message(state, message):
         return
 
     if flow == "title":
-        if not text:
-            ask(chat_id, "عنوان محصول را متنی ارسال کن.")
-            return
-        draft["title"] = text[:150]
+        # انتقال فرایندهای قدیمی به دسته‌بندی
         user["flow"] = "category"
         ask_category(chat_id)
         return
@@ -1074,12 +1087,7 @@ def handle_message(state, message):
         else:
             ask(chat_id, "گزینه معتبر نیست. یکی از گزینه‌های فهرست را دقیق ارسال کن.")
             return
-        draft["weight_unit"] = "gram"
-        user["flow"] = "weight"
-        ask(chat_id, "وزن محصول را برحسب گرم وارد کن؛ اگر نمی‌خواهی ثبت کنی بنویس «ندارد».")
-        return
-
-    if flow == "weight":
+coin weight
         if text in ("ندارد", "ثبت نمی‌کنم", "نامشخص") and draft.get("weight_unit") != "soot":
             draft["weight"] = None
         else:
