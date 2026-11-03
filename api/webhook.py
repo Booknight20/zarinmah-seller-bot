@@ -430,19 +430,45 @@ def send_invoice_to_admin(listing):
         send_message(ADMIN_ID, f"برای آگهی شماره {listing.get('id')} فاکتوری ثبت نشده است.")
         return
 
-    encoded = "/".join(quote(part, safe="") for part in invoice_path.split("/"))
-    signed = sb(
-        "POST",
-        f"/storage/v1/object/sign/listing-invoices/{encoded}",
-        payload={"expiresIn": 120},
-    ) or {}
-    signed_path = signed.get("signedURL") or signed.get("signedUrl")
-    if not signed_path:
-        raise RuntimeError("لینک موقت فاکتور از فضای ذخیره‌سازی دریافت نشد.")
+    if not SUPABASE_URL or not SUPABASE_SERVICE_ROLE_KEY:
+        raise RuntimeError("متغیرهای SUPABASE_URL و SUPABASE_SERVICE_ROLE_KEY در Vercel تنظیم نیستند.")
 
-    signed_url = signed_path if signed_path.startswith("http") else f"{SUPABASE_URL}{signed_path if signed_path.startswith('/') else '/' + signed_path}"
-    response = requests.get(signed_url, timeout=45)
-    response.raise_for_status()
+    # invoice_path از زمان آپلود، مسیر نسبی داخل باکت است؛ نمونه: telegram/abc123.pdf
+    # باکت خصوصی می‌ماند و فایل با مجوز سرور خوانده می‌شود؛ لینک موقت لازم نیست.
+    encoded = "/".join(quote(part, safe="") for part in invoice_path.strip("/").split("/"))
+    object_url = f"{SUPABASE_URL}/storage/v1/object/listing-invoices/{encoded}"
+    response = requests.get(object_url, headers=sb_headers(), timeout=60)
+
+    if not response.ok:
+        try:
+            error_payload = response.json()
+            detail = (
+                error_payload.get("message")
+                or error_payload.get("error")
+                or error_payload.get("statusCode")
+                or str(error_payload)
+            )
+        except Exception:
+            detail = response.text[:500] or response.reason
+
+        logger.error(
+            "ADMIN_INVOICE_STORAGE_DOWNLOAD_FAILED listing_id=%s bucket=%s path=%s http_status=%s detail=%s",
+            listing.get("id"), "listing-invoices", invoice_path,
+            response.status_code, str(detail)[:500],
+        )
+
+        if response.status_code == 404:
+            raise RuntimeError(
+                f"فایل فاکتور در باکت listing-invoices پیدا نشد. مسیر ثبت‌شده: {invoice_path}"
+            )
+        if response.status_code in (401, 403):
+            raise RuntimeError(
+                "Supabase دسترسی خواندن فایل را رد کرد؛ مقدار SUPABASE_SERVICE_ROLE_KEY در Vercel را بررسی کن."
+            )
+        raise RuntimeError(
+            f"دانلود فاکتور از Supabase ناموفق بود (HTTP {response.status_code}): {str(detail)[:250]}"
+        )
+
     content = response.content
     if not content:
         raise RuntimeError("فایل فاکتور خالی است.")
