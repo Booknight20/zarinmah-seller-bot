@@ -394,6 +394,53 @@ def upload_telegram_file(file_id, bucket, object_path, mime):
     return object_path
 
 
+def send_invoice_to_admin(listing):
+    """فاکتور خصوصی آگهی را از Storage دریافت و فقط برای مدیر ارسال می‌کند."""
+    invoice_path = clean(listing.get("invoice_path"), 500)
+    if not invoice_path:
+        send_message(ADMIN_ID, f"برای آگهی شماره {listing.get('id')} فاکتوری ثبت نشده است.")
+        return
+
+    encoded = "/".join(quote(part, safe="") for part in invoice_path.split("/"))
+    signed = sb(
+        "POST",
+        f"/storage/v1/object/sign/listing-invoices/{encoded}",
+        payload={"expiresIn": 120},
+    ) or {}
+    signed_path = signed.get("signedURL") or signed.get("signedUrl")
+    if not signed_path:
+        raise RuntimeError("لینک موقت فاکتور از فضای ذخیره‌سازی دریافت نشد.")
+
+    signed_url = signed_path if signed_path.startswith("http") else f"{SUPABASE_URL}{signed_path if signed_path.startswith('/') else '/' + signed_path}"
+    response = requests.get(signed_url, timeout=45)
+    response.raise_for_status()
+    content = response.content
+    if not content:
+        raise RuntimeError("فایل فاکتور خالی است.")
+    if len(content) > 10 * 1024 * 1024:
+        raise RuntimeError("حجم فاکتور از حد مجاز ارسال تلگرام بیشتر است.")
+
+    extension = os.path.splitext(invoice_path)[1].lower()
+    filename = f"invoice-{listing.get('id')}{extension or '.pdf'}"
+    mime = "application/pdf" if extension == ".pdf" else (
+        "image/png" if extension == ".png" else
+        "image/webp" if extension == ".webp" else
+        "image/jpeg"
+    )
+    caption = f"🧾 فاکتور خصوصی آگهی شماره {listing.get('id')}\n💎 {clean(listing.get('title') or listing.get('product_type'), 150)}"
+    result = requests.post(
+        f"{TG_API}/sendDocument",
+        data={"chat_id": str(ADMIN_ID), "caption": caption},
+        files={"document": (filename, content, mime)},
+        timeout=60,
+    )
+    result.raise_for_status()
+    payload = result.json()
+    if not payload.get("ok"):
+        raise RuntimeError(payload.get("description", "ارسال فاکتور به مدیر ناموفق بود."))
+    logger.info("ADMIN_INVOICE_SENT listing_id=%s", listing.get("id"))
+
+
 def price_label(listing):
     method, value, price = listing.get("pricing_method"), listing.get("pricing_value"), listing.get("price")
     if method == "fixed" and price is not None:
@@ -495,10 +542,13 @@ def notify_admin_pending(listing):
         f"📝 توضیحات: {esc(listing.get('description'))}\n"
         "🧾 فاکتور در فضای خصوصی ذخیره شده است."
     )
-    keyboard = {"inline_keyboard": [[
-        {"text": "✅ تأیید و انتشار", "callback_data": f"approve:{listing['id']}"},
-        {"text": "❌ رد آگهی", "callback_data": f"reject:{listing['id']}"},
-    ]]}
+    keyboard = {"inline_keyboard": [
+        [{"text": "📄 مشاهده فاکتور", "callback_data": f"invoice:{listing['id']}"}],
+        [
+            {"text": "✅ تأیید و انتشار", "callback_data": f"approve:{listing['id']}"},
+            {"text": "❌ رد آگهی", "callback_data": f"reject:{listing['id']}"},
+        ],
+    ]}
     send_message(ADMIN_ID, text, keyboard)
 
 
@@ -881,21 +931,24 @@ def finish_listing(state, user_id, chat_id):
 
 
 def pending_listings(chat_id):
-    rows = sb("GET", "/rest/v1/listings", params={"status": "eq.pending", "deleted_at": "is.null", "select": "id,title,product_type,province,city,seller_name,seller_mobile,weight,weight_unit,pricing_method,pricing_value,price,description", "order": "created_at.asc", "limit": "30"}) or []
+    rows = sb("GET", "/rest/v1/listings", params={"status": "eq.pending", "deleted_at": "is.null", "select": "id,title,product_type,province,city,seller_name,seller_mobile,weight,weight_unit,pricing_method,pricing_value,price,description,invoice_path", "order": "created_at.asc", "limit": "30"}) or []
     if not rows:
         send_message(chat_id, "در حال حاضر آگهی در انتظاری وجود ندارد.")
         return
     for listing in rows:
         text = (f"🆕 <b>آگهی {listing['id']}</b>\n💎 {esc(listing.get('title'))}\n👤 {esc(listing.get('seller_name'))}\n📞 <code>{esc(listing.get('seller_mobile'))}</code>\n📍 {esc(listing.get('province'))}، {esc(listing.get('city'))}\n💰 {esc(price_label(listing))}")
-        keyboard = {"inline_keyboard": [[
-            {"text": "✅ تأیید", "callback_data": f"approve:{listing['id']}"},
-            {"text": "❌ رد", "callback_data": f"reject:{listing['id']}"},
-        ]]}
+        keyboard = {"inline_keyboard": [
+            [{"text": "📄 مشاهده فاکتور", "callback_data": f"invoice:{listing['id']}"}],
+            [
+                {"text": "✅ تأیید", "callback_data": f"approve:{listing['id']}"},
+                {"text": "❌ رد", "callback_data": f"reject:{listing['id']}"},
+            ],
+        ]}
         send_message(chat_id, text, keyboard)
 
 
 def published_listings(chat_id, deleted=False):
-    params = {"select": "id,title,product_type,status,deleted_at", "order": "created_at.desc", "limit": "30"}
+    params = {"select": "id,title,product_type,status,deleted_at,invoice_path", "order": "created_at.desc", "limit": "30"}
     if deleted:
         params["deleted_at"] = "not.is.null"
     else:
@@ -906,13 +959,20 @@ def published_listings(chat_id, deleted=False):
         send_message(chat_id, "موردی برای نمایش وجود ندارد.")
         return
     for listing in rows:
+        invoice_row = [{"text": "📄 مشاهده فاکتور", "callback_data": f"invoice:{listing['id']}"}]
         if deleted:
-            keyboard = {"inline_keyboard": [[{"text": "♻️ بازگردانی آگهی", "callback_data": f"restore:{listing['id']}"}]]}
+            keyboard = {"inline_keyboard": [
+                invoice_row,
+                [{"text": "♻️ بازگردانی آگهی", "callback_data": f"restore:{listing['id']}"}],
+            ]}
         else:
-            keyboard = {"inline_keyboard": [[
-                {"text": "✅ فروش رفت", "callback_data": f"sold:{listing['id']}"},
-                {"text": "🗑 حذف آگهی", "callback_data": f"delete:{listing['id']}"},
-            ]]}
+            keyboard = {"inline_keyboard": [
+                invoice_row,
+                [
+                    {"text": "✅ فروش رفت", "callback_data": f"sold:{listing['id']}"},
+                    {"text": "🗑 حذف آگهی", "callback_data": f"delete:{listing['id']}"},
+                ],
+            ]}
         send_message(chat_id, f"🆔 {listing['id']} — {esc(listing.get('title') or listing.get('product_type'))} — {esc(listing.get('status'))}", keyboard)
 
 
@@ -1217,6 +1277,17 @@ def admin_callback(callback, data):
         object_id = int(raw_id)
     except Exception:
         return "درخواست نامعتبر است.", True
+
+    if action == "invoice":
+        listing = sb_get_listing(object_id)
+        if not listing:
+            return "آگهی پیدا نشد.", True
+        try:
+            send_invoice_to_admin(listing)
+        except Exception:
+            logger.exception("ADMIN_INVOICE_SEND_FAILED listing_id=%s", object_id)
+            return "ارسال فاکتور ناموفق بود؛ تنظیمات Storage و وجود فایل را بررسی کن.", True
+        return "فاکتور در پیام خصوصی مدیر ارسال شد.", False
 
     if action in ("approve", "approve_web", "reject", "reject_web", "sold", "delete", "restore"):
         listing = sb_get_listing(object_id)
