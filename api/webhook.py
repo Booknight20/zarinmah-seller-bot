@@ -49,9 +49,7 @@ JEWELRY = {
 COINS = {
     "تمام سکه امامی": "سکه تمام امامی", "تمام سکه بهار آزادی": "سکه تمام بهار آزادی",
     "نیم سکه": "نیم‌سکه", "ربع سکه": "ربع‌سکه",
-    "سکه یک گرمی بانک مرکزی": "سکه یک گرمی بانک مرکزی",
-    "سکه پارسیان": "سکه پارسیان", "سایر سکه‌ها": "سایر سکه‌ها",
-}
+    "سکه یک گرمی بانک مرکزی": "سکه یک گرمی بانک مرکزی", "سایر سکه‌ها": "سایر سکه‌ها",
 }
 
 # فهرست ۱۴۸۱ شهر واقعی ایران؛ داده‌ها بر اساس تقسیمات کشوری تا پایان ۱۴۰۴.
@@ -241,7 +239,6 @@ def ask(chat_id, text, keyboard=None):
 def start_listing(chat_id, user, kind):
     user["flow"] = "category"
     user["draft"] = {"kind": kind, "photo_file_id": None, "invoice_file_id": None}
-    ask(chat_id, "📝 <b>ثبت آگهی زرین ماه</b>\n\nدسته‌بندی محصول را انتخاب کن. عنوان آگهی پس از دریافت مشخصات کالا به‌صورت خودکار ساخته می‌شود.\nبرای لغو هر زمان /cancel را بفرست.")
     ask_category(chat_id)
 
 
@@ -433,7 +430,20 @@ def send_invoice_to_admin(listing):
         send_message(ADMIN_ID, f"برای آگهی شماره {listing.get('id')} فاکتوری ثبت نشده است.")
         return
 
-invoice
+    encoded = "/".join(quote(part, safe="") for part in invoice_path.split("/"))
+    signed = sb(
+        "POST",
+        f"/storage/v1/object/sign/listing-invoices/{encoded}",
+        payload={"expiresIn": 120},
+    ) or {}
+    signed_path = signed.get("signedURL") or signed.get("signedUrl")
+    if not signed_path:
+        raise RuntimeError("لینک موقت فاکتور از فضای ذخیره‌سازی دریافت نشد.")
+
+    signed_url = signed_path if signed_path.startswith("http") else f"{SUPABASE_URL}{signed_path if signed_path.startswith('/') else '/' + signed_path}"
+    response = requests.get(signed_url, timeout=45)
+    response.raise_for_status()
+    content = response.content
     if not content:
         raise RuntimeError("فایل فاکتور خالی است.")
     if len(content) > 10 * 1024 * 1024:
@@ -725,7 +735,10 @@ def finish_listing(state, user_id, chat_id):
             "owner_user_id": None,
             "owner_telegram_id": str(user_id),
 
-title
+            "title": (
+                clean(draft.get("title"), 150)
+                or clean(draft.get("product_type"), 150)
+            ),
 
             "product_type": draft["product_type"],
             "weight": draft.get("weight"),
@@ -1049,7 +1062,7 @@ def handle_message(state, message):
         return
 
     if flow == "title":
-        # انتقال فرایندهای قدیمی به دسته‌بندی
+        # انتقال فرایندهای قدیمی به مرحله دسته‌بندی
         user["flow"] = "category"
         ask_category(chat_id)
         return
@@ -1087,7 +1100,12 @@ def handle_message(state, message):
         else:
             ask(chat_id, "گزینه معتبر نیست. یکی از گزینه‌های فهرست را دقیق ارسال کن.")
             return
-coin weight
+        draft["weight_unit"] = "gram"
+        user["flow"] = "weight"
+        ask(chat_id, "وزن محصول را برحسب گرم وارد کن؛ اگر نمی‌خواهی ثبت کنی بنویس «ندارد».")
+        return
+
+    if flow == "weight":
         if text in ("ندارد", "ثبت نمی‌کنم", "نامشخص") and draft.get("weight_unit") != "soot":
             draft["weight"] = None
         else:
