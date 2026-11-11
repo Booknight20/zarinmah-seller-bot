@@ -142,18 +142,6 @@ def account_search(value):
     return re.sub(r"[^0-9A-Za-z\u0600-\u06FF\s@._+\-]", "", value).strip()
 
 
-def account_page(value):
-    try:
-        return max(1, min(int(value), 100000))
-    except (TypeError, ValueError):
-        return 1
-
-
-def account_search(value):
-    value = clean(value, 80)
-    return re.sub(r"[^0-9A-Za-z\u0600-\u06FF\s@._+\-]", "", value).strip()
-
-
 def get_account_data(user, query=None):
     query = query or {}
     profile = require_complete_profile(user)
