@@ -172,14 +172,39 @@ def update_user_profile(user, data):
     full_name = clean(data.get("full_name"), 100)
     if len(full_name.split()) < 2 or len(full_name) < 5:
         raise ValueError("نام و نام خانوادگی کامل را وارد کنید.")
-    rows = sb_request(
-        "PATCH", "/rest/v1/profiles",
-        params={"id": f"eq.{user['id']}"},
-        payload={"full_name": full_name, "updated_at": now_iso()},
-        prefer="return=representation",
-    ) or []
+    existing = get_user_profile(user)
+    if existing:
+        rows = sb_request(
+            "PATCH", "/rest/v1/profiles",
+            params={"id": f"eq.{user['id']}"},
+            payload={"full_name": full_name, "updated_at": now_iso()},
+            prefer="return=representation",
+        ) or []
+    else:
+        rows = sb_request(
+            "POST", "/rest/v1/profiles",
+            payload={
+                "id": user["id"],
+                "full_name": full_name,
+                "mobile": user["phone"],
+                "is_active": True,
+                "created_at": now_iso(),
+                "updated_at": now_iso(),
+            },
+            prefer="return=representation",
+        ) or []
     if not rows:
-        raise ProfileIncompleteError("پروفایل شما هنوز در سامانه ایجاد نشده است. کمی بعد دوباره تلاش کنید.")
+        raise ProfileIncompleteError("ذخیره پروفایل انجام نشد. کمی بعد دوباره تلاش کنید.")
+    role_rows = sb_request(
+        "GET", "/rest/v1/user_roles",
+        params={"user_id": f"eq.{user['id']}", "select": "role", "limit": "1"},
+    ) or []
+    if not role_rows:
+        sb_request(
+            "POST", "/rest/v1/user_roles",
+            payload={"user_id": user["id"], "role": "user"},
+            prefer="resolution=ignore-duplicates,return=minimal",
+        )
     return rows[0]
 
 
