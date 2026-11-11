@@ -816,9 +816,13 @@ class handler(BaseHTTPRequestHandler):
                 if row.get("status") in ("published", "sold") and row.get("deleted_at") is None
             ]
             respond(self, 200, {"ok": True, "listings": listings})
+        except AuthError as exc:
+            respond(self, 401, {"ok": False, "error": str(exc)})
+        except ProfileIncompleteError as exc:
+            respond(self, 409, {"ok": False, "code": "PROFILE_INCOMPLETE", "error": str(exc)})
         except Exception as exc:
-            print("PUBLIC LISTINGS ERROR:", str(exc)[:300])
-            respond(self, 500, {"ok": False, "error": "دریافت آگهی‌ها از پایگاه داده ناموفق بود. تنظیمات Supabase و تابع get_public_listings را بررسی کنید."})
+            print("LISTINGS GET ERROR:", str(exc)[:300])
+            respond(self, 500, {"ok": False, "error": "دریافت اطلاعات از پایگاه داده ناموفق بود. گزارش Vercel را بررسی کنید."})
 
     def do_POST(self):
         try:
