@@ -173,6 +173,8 @@ def update_user_profile(user, data):
     if len(full_name.split()) < 2 or len(full_name) < 5:
         raise ValueError("نام و نام خانوادگی کامل را وارد کنید.")
     existing = get_user_profile(user)
+    if existing and existing.get("is_active") is not True:
+        raise AuthError("حساب کاربری شما غیرفعال است. برای پیگیری با پشتیبانی تماس بگیرید.")
     if existing:
         rows = sb_request(
             "PATCH", "/rest/v1/profiles",
@@ -693,6 +695,12 @@ class handler(BaseHTTPRequestHandler):
                     return
                 profile = update_user_profile(user, fields)
                 respond(self, 200, {"ok": True, "profile": profile, "message": "پروفایل شما با موفقیت تکمیل شد."})
+                return
+            if PREVIEW_DRY_RUN:
+                respond(self, 200, {
+                    "ok": True, "preview": True,
+                    "message": "ورود و ارسال آزمایشی تأیید شد؛ در این نسخه هیچ آگهی، درخواست خرید یا پیام تلگرامی ذخیره و ارسال نشد.",
+                })
                 return
             if not uploads and fields.get("action") == "purchase":
                 request_row, listing = save_purchase_request(fields, user)
