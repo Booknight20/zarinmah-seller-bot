@@ -106,156 +106,148 @@ def sb_request(method, path, *, params=None, payload=None, raw=None, content_typ
         return None
 
 
-class AuthError(Exception):
-    pass
-
-
-class ProfileIncompleteError(Exception):
-    pass
-
-
-def authenticate_user(handler):
-    authorization = clean(handler.headers.get("Authorization", ""), 2048)
-    if not authorization.startswith("Bearer "):
-        raise AuthError("برای ادامه ابتدا وارد حساب کاربری شوید.")
-    if not SUPABASE_URL or not SUPABASE_SERVICE_ROLE_KEY:
-        raise RuntimeError("تنظیمات اتصال به Supabase کامل نیست.")
+def sb_request_counted(path, params):
+    headers = sb_headers({"Prefer": "count=exact"})
+    response = requests.get(
+        SUPABASE_URL + path, headers=headers, params=params, timeout=SUPABASE_TIMEOUT
+    )
+    if not response.ok:
+        try:
+            body = response.json()
+            detail = body.get("message") or body.get("details") or body.get("hint") or str(body)
+        except Exception:
+            detail = response.text[:400]
+        raise RuntimeError(f"Supabase {response.status_code}: {detail}")
     try:
-        response = requests.get(
-            SUPABASE_URL + "/auth/v1/user",
-            headers={
-                "apikey": SUPABASE_SERVICE_ROLE_KEY,
-                "Authorization": authorization,
-            },
-            timeout=15,
-        )
-    except requests.RequestException:
-        raise RuntimeError("بررسی حساب کاربری موقتاً ناموفق بود.")
-    if response.status_code != 200:
-        raise AuthError("نشست ورود معتبر نیست یا منقضی شده است؛ دوباره وارد شوید.")
-    try:
-        user = response.json()
+        rows = response.json() if response.content else []
     except ValueError:
-        raise AuthError("پاسخ احراز هویت معتبر نیست.")
-    user_id = clean(user.get("id"), 80)
-    phone = clean(user.get("phone"), 30)
-    if not user_id or not valid_phone(phone):
-        raise AuthError("حساب کاربری باید شماره موبایل تأییدشده داشته باشد.")
-    return {"id": user_id, "phone": phone}
+        rows = []
+    content_range = response.headers.get("Content-Range", "")
+    try:
+        total = int(content_range.rsplit("/", 1)[1])
+    except (IndexError, ValueError):
+        total = len(rows)
+    return rows, total
 
 
-def get_user_profile(user):
-    rows = sb_request(
-        "GET", "/rest/v1/profiles",
-        params={
-            "id": f"eq.{user['id']}",
-            "select": "id,full_name,mobile,is_active",
-            "limit": "1",
-        },
-    ) or []
-    return rows[0] if rows else None
+def account_page(value):
+    try:
+        return max(1, min(int(value), 100000))
+    except (TypeError, ValueError):
+        return 1
 
 
-def require_complete_profile(user):
-    profile = get_user_profile(user)
-    if not profile:
-        raise ProfileIncompleteError("پروفایل حساب شما هنوز ایجاد نشده است. صفحه را تازه‌سازی کنید یا با پشتیبانی تماس بگیرید.")
-    if profile.get("is_active") is not True:
-        raise AuthError("حساب کاربری شما غیرفعال است. برای پیگیری با پشتیبانی تماس بگیرید.")
-    full_name = clean(profile.get("full_name"), 100)
-    if not full_name:
-        raise ProfileIncompleteError("برای ادامه، ابتدا نام و نام خانوادگی خود را در حساب کاربری تکمیل کنید.")
-    return profile
+def account_search(value):
+    value = clean(value, 80)
+    return re.sub(r"[^0-9A-Za-z\u0600-\u06FF\s@._+\-]", "", value).strip()
 
 
-def update_user_profile(user, data):
-    full_name = clean(data.get("full_name"), 100)
-    if len(full_name.split()) < 2 or len(full_name) < 5:
-        raise ValueError("نام و نام خانوادگی کامل را وارد کنید.")
-    existing = get_user_profile(user)
-    if existing and existing.get("is_active") is not True:
-        raise AuthError("حساب کاربری شما غیرفعال است. برای پیگیری با پشتیبانی تماس بگیرید.")
-    if existing:
-        rows = sb_request(
-            "PATCH", "/rest/v1/profiles",
-            params={"id": f"eq.{user['id']}"},
-            payload={"full_name": full_name, "updated_at": now_iso()},
-            prefer="return=representation",
-        ) or []
-    else:
-        rows = sb_request(
-            "POST", "/rest/v1/profiles",
-            payload={
-                "id": user["id"],
-                "full_name": full_name,
-                "mobile": user["phone"],
-                "is_active": True,
-                "created_at": now_iso(),
-                "updated_at": now_iso(),
-            },
-            prefer="return=representation",
-        ) or []
-    if not rows:
-        raise ProfileIncompleteError("ذخیره پروفایل انجام نشد. کمی بعد دوباره تلاش کنید.")
-    role_rows = sb_request(
-        "GET", "/rest/v1/user_roles",
-        params={"user_id": f"eq.{user['id']}", "select": "role", "limit": "1"},
-    ) or []
-    if not role_rows:
-        sb_request(
-            "POST", "/rest/v1/user_roles",
-            payload={"user_id": user["id"], "role": "user"},
-            prefer="resolution=ignore-duplicates,return=minimal",
-        )
-    return rows[0]
+def account_page(value):
+    try:
+        return max(1, min(int(value), 100000))
+    except (TypeError, ValueError):
+        return 1
 
 
+def account_search(value):
+    value = clean(value, 80)
+    return re.sub(r"[^0-9A-Za-z\u0600-\u06FF\s@._+\-]", "", value).strip()
 
 
-def get_user_role(user):
-    rows = sb_request(
-        "GET", "/rest/v1/user_roles",
-        params={"user_id": f"eq.{user['id']}", "select": "role", "limit": "1"},
-    ) or []
-    return rows[0].get("role", "user") if rows else "user"
-
-
-def require_admin(user):
-    profile = require_complete_profile(user)
-    if get_user_role(user) != "admin":
-        raise AuthError("این عملیات فقط برای مدیر سامانه مجاز است.")
-    return profile
-
-
-def get_account_data(user):
+def get_account_data(user, query=None):
+    query = query or {}
     profile = require_complete_profile(user)
     role = get_user_role(user)
     admin = role == "admin"
+    per_page = 20
+    listings_page = account_page((query.get("listings_page") or ["1"])[0])
+    requests_page = account_page((query.get("requests_page") or ["1"])[0])
+    listings_status = clean((query.get("listings_status") or ["all"])[0], 20)
+    requests_status = clean((query.get("requests_status") or ["all"])[0], 20)
+    listings_search = account_search((query.get("listings_search") or [""])[0])
+    requests_search = account_search((query.get("requests_search") or [""])[0])
+
     listing_params = {
         "select": "id,title,product_type,weight,weight_unit,purity,province,city,description,pricing_method,pricing_value,price,image_url,status,created_at,updated_at,deleted_at,seller_name,seller_mobile,owner_user_id",
         "order": "created_at.desc",
-        "limit": "100",
+        "limit": str(per_page),
+        "offset": str((listings_page - 1) * per_page),
     }
     request_params = {
         "select": "id,listing_id,buyer_name,buyer_mobile,message,status,created_at,updated_at,buyer_user_id",
         "order": "created_at.desc",
-        "limit": "100",
+        "limit": str(per_page),
+        "offset": str((requests_page - 1) * per_page),
     }
     if not admin:
         listing_params["owner_user_id"] = f"eq.{user['id']}"
         request_params["buyer_user_id"] = f"eq.{user['id']}"
-    listings = sb_request("GET", "/rest/v1/listings", params=listing_params) or []
-    requests_rows = sb_request("GET", "/rest/v1/purchase_requests", params=request_params) or []
-    titles = {str(item.get("id")): item.get("title") or item.get("product_type") or "آگهی" for item in listings}
+
+    if listings_status == "deleted":
+        listing_params["deleted_at"] = "not.is.null"
+    else:
+        listing_params["deleted_at"] = "is.null"
+        if listings_status in ("pending", "published", "sold"):
+            listing_params["status"] = f"eq.{listings_status}"
+        elif listings_status != "all":
+            listings_status = "all"
+
+    if requests_status in ("pending", "forwarded"):
+        request_params["status"] = f"eq.{requests_status}"
+    elif requests_status != "all":
+        requests_status = "all"
+
+    if listings_search:
+        term = f"*{listings_search}*"
+        listing_params["or"] = (
+            f"(title.ilike.{term},product_type.ilike.{term},"
+            f"seller_name.ilike.{term},seller_mobile.ilike.{term},city.ilike.{term})"
+        )
+    if requests_search:
+        term = f"*{requests_search}*"
+        request_params["or"] = (
+            f"(buyer_name.ilike.{term},buyer_mobile.ilike.{term},message.ilike.{term})"
+        )
+
+    listings, listings_total = sb_request_counted("/rest/v1/listings", listing_params)
+    requests_rows, requests_total = sb_request_counted("/rest/v1/purchase_requests", request_params)
+
+    titles = {
+        str(item.get("id")): item.get("title") or item.get("product_type") or "آگهی"
+        for item in listings
+    }
     for request_row in requests_rows:
-        request_row["listing_title"] = titles.get(str(request_row.get("listing_id")), f"آگهی شماره {request_row.get('listing_id')}")
+        request_row["listing_title"] = titles.get(
+            str(request_row.get("listing_id")),
+            f"آگهی شماره {request_row.get('listing_id')}",
+        )
         if not admin:
             request_row.pop("buyer_mobile", None)
-    return {
-        "ok": True, "profile": profile, "role": role,
-        "listings": listings, "purchase_requests": requests_rows,
-    }
 
+    return {
+        "ok": True,
+        "profile": profile,
+        "role": role,
+        "listings": listings,
+        "purchase_requests": requests_rows,
+        "pagination": {
+            "per_page": per_page,
+            "listings": {
+                "page": listings_page,
+                "total": listings_total,
+                "total_pages": max(1, (listings_total + per_page - 1) // per_page),
+                "status": listings_status,
+                "search": listings_search,
+            },
+            "requests": {
+                "page": requests_page,
+                "total": requests_total,
+                "total_pages": max(1, (requests_total + per_page - 1) // per_page),
+                "status": requests_status,
+                "search": requests_search,
+            },
+        },
+    }
 
 def update_listing_status(listing_id, payload, filters):
     rows = sb_request(
@@ -797,7 +789,7 @@ class handler(BaseHTTPRequestHandler):
                 return
             if action == "account":
                 user = authenticate_user(self)
-                respond(self, 200, get_account_data(user))
+                respond(self, 200, get_account_data(user, query))
                 return
             # Read directly from listings so deleted_at filtering does not depend on an old RPC.
             rows = sb_request(
