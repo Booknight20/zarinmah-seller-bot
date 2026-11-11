@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from email import policy
 from email.parser import BytesParser
 from http.server import BaseHTTPRequestHandler
-from urllib.parse import quote
+from urllib.parse import parse_qs, quote
 
 import requests
 
@@ -110,6 +110,10 @@ class AuthError(Exception):
     pass
 
 
+class ProfileIncompleteError(Exception):
+    pass
+
+
 def authenticate_user(handler):
     authorization = clean(handler.headers.get("Authorization", ""), 2048)
     if not authorization.startswith("Bearer "):
@@ -138,6 +142,45 @@ def authenticate_user(handler):
     if not user_id or not valid_phone(phone):
         raise AuthError("حساب کاربری باید شماره موبایل تأییدشده داشته باشد.")
     return {"id": user_id, "phone": phone}
+
+
+def get_user_profile(user):
+    rows = sb_request(
+        "GET", "/rest/v1/profiles",
+        params={
+            "id": f"eq.{user['id']}",
+            "select": "id,full_name,mobile,is_active",
+            "limit": "1",
+        },
+    ) or []
+    return rows[0] if rows else None
+
+
+def require_complete_profile(user):
+    profile = get_user_profile(user)
+    if not profile:
+        raise ProfileIncompleteError("پروفایل حساب شما هنوز ایجاد نشده است. صفحه را تازه‌سازی کنید یا با پشتیبانی تماس بگیرید.")
+    if profile.get("is_active") is not True:
+        raise AuthError("حساب کاربری شما غیرفعال است. برای پیگیری با پشتیبانی تماس بگیرید.")
+    full_name = clean(profile.get("full_name"), 100)
+    if not full_name:
+        raise ProfileIncompleteError("برای ادامه، ابتدا نام و نام خانوادگی خود را در حساب کاربری تکمیل کنید.")
+    return profile
+
+
+def update_user_profile(user, data):
+    full_name = clean(data.get("full_name"), 100)
+    if len(full_name.split()) < 2 or len(full_name) < 5:
+        raise ValueError("نام و نام خانوادگی کامل را وارد کنید.")
+    rows = sb_request(
+        "PATCH", "/rest/v1/profiles",
+        params={"id": f"eq.{user['id']}"},
+        payload={"full_name": full_name, "updated_at": now_iso()},
+        prefer="return=representation",
+    ) or []
+    if not rows:
+        raise ProfileIncompleteError("پروفایل شما هنوز در سامانه ایجاد نشده است. کمی بعد دوباره تلاش کنید.")
+    return rows[0]
 
 
 def upload_storage(bucket, path, content, mime):
@@ -369,6 +412,7 @@ def send_invoice_to_admin(upload, listing_id):
 
 
 def create_listing(fields, uploads, user):
+    profile = require_complete_profile(user)
     photo = check_file(uploads.get("sellerPhoto") or uploads.get("photo"), {"image/jpeg", "image/png", "image/webp"}, "عکس محصول")
     invoice = check_file(uploads.get("sellerInvoice") or uploads.get("invoice"), {"image/jpeg", "image/png", "image/webp", "application/pdf"}, "فاکتور فروش")
     if not sniff_photo(photo["data"]):
@@ -376,14 +420,14 @@ def create_listing(fields, uploads, user):
     if not sniff_invoice(invoice["data"]):
         raise ValueError("محتوای فاکتور معتبر نیست.")
 
-    seller_name = clean(fields.get("sellerName"), 100)
+    seller_name = clean(profile.get("full_name"), 100)
     seller_mobile = clean(user.get("phone"), 30)
     submitted_phone = clean(fields.get("sellerPhone"), 30)
     description = clean(fields.get("sellerDescription"), 2000)
     province = clean(fields.get("province"), 100)
     city = clean(fields.get("city"), 100)
     if not all((seller_name, seller_mobile, description, province, city)):
-        raise ValueError("نام، شماره تماس، توضیحات، استان و شهر الزامی هستند.")
+        raise ValueError("اطلاعات پروفایل، شماره تماس، توضیحات، استان و شهر الزامی هستند.")
     if not valid_phone(seller_mobile):
         raise ValueError("شماره موبایل تأییدشده حساب معتبر نیست.")
     if submitted_phone and phone_digits(submitted_phone) != phone_digits(seller_mobile):
@@ -502,6 +546,7 @@ def public_listing(item):
 
 
 def save_purchase_request(data, user):
+    profile = require_complete_profile(user)
     try:
         listing_id = int(data.get("listing_id", 0))
     except (TypeError, ValueError):
@@ -509,7 +554,7 @@ def save_purchase_request(data, user):
     listing = get_listing(listing_id)
     if not listing or listing.get("status") != "published" or listing.get("deleted_at"):
         raise ValueError("این آگهی دیگر برای خرید در دسترس نیست.")
-    buyer_name = clean(data.get("buyer_name"), 100)
+    buyer_name = clean(profile.get("full_name"), 100)
     buyer_mobile = clean(user.get("phone"), 30)
     if not buyer_name or not buyer_mobile:
         raise ValueError("نام و شماره موبایل تأییدشده حساب برای ثبت درخواست الزامی است.")
@@ -575,6 +620,20 @@ class handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         try:
+            query = parse_qs(self.path.split("?", 1)[1]) if "?" in self.path else {}
+            if query.get("action", [""])[0] == "profile":
+                user = authenticate_user(self)
+                profile = get_user_profile(user)
+                if not profile:
+                    respond(self, 200, {"ok": True, "profile": None, "role": "user"})
+                    return
+                roles = sb_request(
+                    "GET", "/rest/v1/user_roles",
+                    params={"user_id": f"eq.{user['id']}", "select": "role", "limit": "1"},
+                ) or []
+                role = roles[0].get("role") if roles else "user"
+                respond(self, 200, {"ok": True, "profile": profile, "role": role})
+                return
             # Read directly from listings so deleted_at filtering does not depend on an old RPC.
             rows = sb_request(
                 "GET",
@@ -600,11 +659,15 @@ class handler(BaseHTTPRequestHandler):
         try:
             user = authenticate_user(self)
             fields, uploads = parse_body(self)
-            if PREVIEW_DRY_RUN:
-                respond(self, 200, {
-                    "ok": True, "preview": True,
-                    "message": "ورود و ارسال آزمایشی تأیید شد؛ در این نسخه هیچ اطلاعاتی در دیتابیس ذخیره و هیچ پیامی ارسال نشد.",
-                })
+            if fields.get("action") == "complete_profile":
+                if PREVIEW_DRY_RUN:
+                    respond(self, 200, {
+                        "ok": True, "preview": True,
+                        "message": "اعتبارسنجی فرم تکمیل پروفایل در حالت آزمایشی انجام شد؛ اطلاعات ذخیره نشد.",
+                    })
+                    return
+                profile = update_user_profile(user, fields)
+                respond(self, 200, {"ok": True, "profile": profile, "message": "پروفایل شما با موفقیت تکمیل شد."})
                 return
             if not uploads and fields.get("action") == "purchase":
                 request_row, listing = save_purchase_request(fields, user)
@@ -624,6 +687,8 @@ class handler(BaseHTTPRequestHandler):
             respond(self, 201 if result["admin_notification_sent"] else 202, {"ok": True, **result})
         except AuthError as exc:
             respond(self, 401, {"ok": False, "error": str(exc)})
+        except ProfileIncompleteError as exc:
+            respond(self, 409, {"ok": False, "code": "PROFILE_INCOMPLETE", "error": str(exc)})
         except (ValueError, UnicodeDecodeError, json.JSONDecodeError) as exc:
             respond(self, 400, {"ok": False, "error": str(exc)})
         except Exception as exc:
