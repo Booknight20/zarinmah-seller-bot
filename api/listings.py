@@ -17,6 +17,7 @@ TG_API = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}" if TELEGRAM_TOKEN else 
 SUPABASE_URL = os.environ.get("SUPABASE_URL", "").rstrip("/")
 SUPABASE_SERVICE_ROLE_KEY = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "")
 SUPABASE_TIMEOUT = 30
+PREVIEW_DRY_RUN = os.environ.get("ZARINMAH_PREVIEW_DRY_RUN", "").strip().lower() == "true"
 MAX_BODY_SIZE = 4 * 1024 * 1024
 MAX_FILE_SIZE = 1536 * 1024
 
@@ -103,6 +104,40 @@ def sb_request(method, path, *, params=None, payload=None, raw=None, content_typ
         return response.json()
     except ValueError:
         return None
+
+
+class AuthError(Exception):
+    pass
+
+
+def authenticate_user(handler):
+    authorization = clean(handler.headers.get("Authorization", ""), 2048)
+    if not authorization.startswith("Bearer "):
+        raise AuthError("برای ادامه ابتدا وارد حساب کاربری شوید.")
+    if not SUPABASE_URL or not SUPABASE_SERVICE_ROLE_KEY:
+        raise RuntimeError("تنظیمات اتصال به Supabase کامل نیست.")
+    try:
+        response = requests.get(
+            SUPABASE_URL + "/auth/v1/user",
+            headers={
+                "apikey": SUPABASE_SERVICE_ROLE_KEY,
+                "Authorization": authorization,
+            },
+            timeout=15,
+        )
+    except requests.RequestException:
+        raise RuntimeError("بررسی حساب کاربری موقتاً ناموفق بود.")
+    if response.status_code != 200:
+        raise AuthError("نشست ورود معتبر نیست یا منقضی شده است؛ دوباره وارد شوید.")
+    try:
+        user = response.json()
+    except ValueError:
+        raise AuthError("پاسخ احراز هویت معتبر نیست.")
+    user_id = clean(user.get("id"), 80)
+    phone = clean(user.get("phone"), 30)
+    if not user_id or not valid_phone(phone):
+        raise AuthError("حساب کاربری باید شماره موبایل تأییدشده داشته باشد.")
+    return {"id": user_id, "phone": phone}
 
 
 def upload_storage(bucket, path, content, mime):
@@ -333,7 +368,7 @@ def send_invoice_to_admin(upload, listing_id):
     return result["result"]
 
 
-def create_listing(fields, uploads):
+def create_listing(fields, uploads, user):
     photo = check_file(uploads.get("sellerPhoto") or uploads.get("photo"), {"image/jpeg", "image/png", "image/webp"}, "عکس محصول")
     invoice = check_file(uploads.get("sellerInvoice") or uploads.get("invoice"), {"image/jpeg", "image/png", "image/webp", "application/pdf"}, "فاکتور فروش")
     if not sniff_photo(photo["data"]):
@@ -342,14 +377,17 @@ def create_listing(fields, uploads):
         raise ValueError("محتوای فاکتور معتبر نیست.")
 
     seller_name = clean(fields.get("sellerName"), 100)
-    seller_mobile = clean(fields.get("sellerPhone"), 30)
+    seller_mobile = clean(user.get("phone"), 30)
+    submitted_phone = clean(fields.get("sellerPhone"), 30)
     description = clean(fields.get("sellerDescription"), 2000)
     province = clean(fields.get("province"), 100)
     city = clean(fields.get("city"), 100)
     if not all((seller_name, seller_mobile, description, province, city)):
         raise ValueError("نام، شماره تماس، توضیحات، استان و شهر الزامی هستند.")
     if not valid_phone(seller_mobile):
-        raise ValueError("شماره تماس معتبر نیست.")
+        raise ValueError("شماره موبایل تأییدشده حساب معتبر نیست.")
+    if submitted_phone and phone_digits(submitted_phone) != phone_digits(seller_mobile):
+        raise ValueError("شماره تماس آگهی باید با شماره تأییدشده حساب یکسان باشد.")
     if province not in PROVINCES:
         raise ValueError("استان انتخاب‌شده معتبر نیست.")
     if fields.get("invoiceConfirm") not in ("on", "true", "1", "yes", "بله"):
@@ -370,7 +408,7 @@ def create_listing(fields, uploads):
         saved_invoice_path = upload_storage("listing-invoices", invoice_path, invoice["data"], invoice["content_type"])
         invoice_uploaded = True
         row = {
-            "owner_user_id": None,
+            "owner_user_id": user["id"],
             "owner_telegram_id": None,
             "title": title,
             "product_type": product_type,
@@ -463,7 +501,7 @@ def public_listing(item):
     }
 
 
-def save_purchase_request(data):
+def save_purchase_request(data, user):
     try:
         listing_id = int(data.get("listing_id", 0))
     except (TypeError, ValueError):
@@ -472,11 +510,13 @@ def save_purchase_request(data):
     if not listing or listing.get("status") != "published" or listing.get("deleted_at"):
         raise ValueError("این آگهی دیگر برای خرید در دسترس نیست.")
     buyer_name = clean(data.get("buyer_name"), 100)
-    buyer_mobile = clean(data.get("buyer_phone") or data.get("buyer_mobile"), 30)
+    buyer_mobile = clean(user.get("phone"), 30)
     if not buyer_name or not buyer_mobile:
-        raise ValueError("نام و شماره تماس برای ثبت درخواست الزامی است.")
+        raise ValueError("نام و شماره موبایل تأییدشده حساب برای ثبت درخواست الزامی است.")
     if not valid_phone(buyer_mobile):
         raise ValueError("شماره تماس معتبر نیست.")
+    if str(listing.get("owner_user_id") or "") == str(user.get("id") or ""):
+        raise ValueError("برای آگهی خودتان نمی‌توانید درخواست خرید ثبت کنید.")
     if phone_digits(buyer_mobile) == phone_digits(listing.get("seller_mobile")):
         raise ValueError("شماره تماس خریدار و فروشنده نمی‌تواند یکسان باشد.")
     existing = sb_request("GET", "/rest/v1/purchase_requests", params={
@@ -487,7 +527,7 @@ def save_purchase_request(data):
     if existing:
         raise ValueError("درخواست قبلی شما برای این آگهی ثبت شده است.")
     row = {
-        "listing_id": listing_id, "buyer_user_id": None,
+        "listing_id": listing_id, "buyer_user_id": user["id"],
         "buyer_telegram_id": None, "buyer_name": buyer_name,
         "buyer_mobile": phone_digits(buyer_mobile),
         "message": clean(data.get("message") or "درخواست خرید از سایت زرین ماه", 1000),
@@ -522,7 +562,7 @@ def respond(handler, status, payload):
     handler.send_header("Cache-Control", "no-store")
     handler.send_header("Access-Control-Allow-Origin", "*")
     handler.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-    handler.send_header("Access-Control-Allow-Headers", "Content-Type, Accept")
+    handler.send_header("Access-Control-Allow-Headers", "Content-Type, Accept, Authorization")
     handler.send_header("Content-Length", str(len(body)))
     handler.end_headers()
     if status != 204:
@@ -558,9 +598,16 @@ class handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         try:
+            user = authenticate_user(self)
             fields, uploads = parse_body(self)
+            if PREVIEW_DRY_RUN:
+                respond(self, 200, {
+                    "ok": True, "preview": True,
+                    "message": "ورود و ارسال آزمایشی تأیید شد؛ در این نسخه هیچ اطلاعاتی در دیتابیس ذخیره و هیچ پیامی ارسال نشد.",
+                })
+                return
             if not uploads and fields.get("action") == "purchase":
-                request_row, listing = save_purchase_request(fields)
+                request_row, listing = save_purchase_request(fields, user)
                 notified = False
                 try:
                     notify_purchase_admin(request_row, listing)
@@ -573,8 +620,10 @@ class handler(BaseHTTPRequestHandler):
                     "message": "درخواست خرید ثبت شد. از ثبت دوباره خودداری کنید.",
                 })
                 return
-            result = create_listing(fields, uploads)
+            result = create_listing(fields, uploads, user)
             respond(self, 201 if result["admin_notification_sent"] else 202, {"ok": True, **result})
+        except AuthError as exc:
+            respond(self, 401, {"ok": False, "error": str(exc)})
         except (ValueError, UnicodeDecodeError, json.JSONDecodeError) as exc:
             respond(self, 400, {"ok": False, "error": str(exc)})
         except Exception as exc:
