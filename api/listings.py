@@ -276,16 +276,34 @@ def admin_listing_action(user, data):
     except (TypeError, ValueError):
         raise ValueError("شناسه آگهی معتبر نیست.")
     action = clean(data.get("listing_action"), 30)
-    actions = {
-        "publish": {"status": "published", "deleted_at": None},
-        "reject": {"status": "rejected", "deleted_at": None},
-        "sold": {"status": "sold", "deleted_at": None},
-        "delete": {"deleted_at": now_iso()},
-        "restore": {"status": "pending", "deleted_at": None},
-    }
-    if action not in actions:
+    listing = get_listing(listing_id)
+    if not listing:
+        raise ValueError("آگهی پیدا نشد.")
+    deleted = bool(listing.get("deleted_at"))
+    status = listing.get("status")
+    if action == "publish":
+        if deleted or status != "pending":
+            raise ValueError("فقط آگهی در انتظار و حذف‌نشده قابل انتشار است.")
+        patch, filters = {"status": "published", "published_at": now_iso()}, {"id": f"eq.{listing_id}", "status": "eq.pending", "deleted_at": "is.null"}
+    elif action == "reject":
+        if deleted or status != "pending":
+            raise ValueError("فقط آگهی در انتظار بررسی قابل رد است.")
+        patch, filters = {"deleted_at": now_iso()}, {"id": f"eq.{listing_id}", "status": "eq.pending", "deleted_at": "is.null"}
+    elif action == "sold":
+        if deleted or status != "published":
+            raise ValueError("فقط آگهی منتشرشده را می‌توان فروش‌رفته کرد.")
+        patch, filters = {"status": "sold", "sold_at": now_iso()}, {"id": f"eq.{listing_id}", "status": "eq.published", "deleted_at": "is.null"}
+    elif action == "delete":
+        if deleted:
+            raise ValueError("این آگهی قبلاً حذف شده است.")
+        patch, filters = {"deleted_at": now_iso()}, {"id": f"eq.{listing_id}", "deleted_at": "is.null"}
+    elif action == "restore":
+        if not deleted:
+            raise ValueError("این آگهی حذف نشده است.")
+        patch, filters = {"deleted_at": None}, {"id": f"eq.{listing_id}", "deleted_at": "not.is.null"}
+    else:
         raise ValueError("عملیات مدیریتی آگهی معتبر نیست.")
-    row = update_listing_status(listing_id, actions[action], {"id": f"eq.{listing_id}"})
+    row = update_listing_status(listing_id, patch, filters)
     return {"ok": True, "listing": row, "message": "وضعیت آگهی به‌روزرسانی شد."}
 
 
@@ -296,16 +314,20 @@ def owner_listing_action(user, data):
     except (TypeError, ValueError):
         raise ValueError("شناسه آگهی معتبر نیست.")
     action = clean(data.get("listing_action"), 30)
+    listing = get_listing(listing_id)
+    if not listing or str(listing.get("owner_user_id") or "") != str(user.get("id") or ""):
+        raise ValueError("آگهی پیدا نشد یا متعلق به حساب شما نیست.")
+    if listing.get("deleted_at"):
+        raise ValueError("آگهی حذف‌شده قابل تغییر نیست.")
     if action == "sold":
-        patch = {"status": "sold", "deleted_at": None}
+        if listing.get("status") != "published":
+            raise ValueError("فقط آگهی منتشرشده را می‌توانید فروش‌رفته کنید.")
+        patch, filters = {"status": "sold", "sold_at": now_iso()}, {"id": f"eq.{listing_id}", "owner_user_id": f"eq.{user['id']}", "status": "eq.published", "deleted_at": "is.null"}
     elif action == "delete":
-        patch = {"deleted_at": now_iso()}
+        patch, filters = {"deleted_at": now_iso()}, {"id": f"eq.{listing_id}", "owner_user_id": f"eq.{user['id']}", "deleted_at": "is.null"}
     else:
         raise ValueError("عملیات آگهی معتبر نیست.")
-    row = update_listing_status(
-        listing_id, patch,
-        {"id": f"eq.{listing_id}", "owner_user_id": f"eq.{user['id']}"},
-    )
+    row = update_listing_status(listing_id, patch, filters)
     return {"ok": True, "listing": row, "message": "آگهی شما به‌روزرسانی شد."}
 
 
