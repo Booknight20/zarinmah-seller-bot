@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from email import policy
 from email.parser import BytesParser
 from http.server import BaseHTTPRequestHandler
-from urllib.parse import quote
+from urllib.parse import parse_qs, quote
 
 import requests
 
@@ -17,6 +17,7 @@ TG_API = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}" if TELEGRAM_TOKEN else 
 SUPABASE_URL = os.environ.get("SUPABASE_URL", "").rstrip("/")
 SUPABASE_SERVICE_ROLE_KEY = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "")
 SUPABASE_TIMEOUT = 30
+PREVIEW_DRY_RUN = os.environ.get("ZARINMAH_PREVIEW_DRY_RUN", "").strip().lower() == "true"
 MAX_BODY_SIZE = 4 * 1024 * 1024
 MAX_FILE_SIZE = 1536 * 1024
 
@@ -104,6 +105,352 @@ def sb_request(method, path, *, params=None, payload=None, raw=None, content_typ
     except ValueError:
         return None
 
+
+class AuthError(Exception):
+    pass
+
+
+class ProfileIncompleteError(Exception):
+    pass
+
+
+def authenticate_user(handler):
+    authorization = clean(handler.headers.get("Authorization", ""), 2048)
+    if not authorization.startswith("Bearer "):
+        raise AuthError("برای ادامه ابتدا وارد حساب کاربری شوید.")
+    if not SUPABASE_URL or not SUPABASE_SERVICE_ROLE_KEY:
+        raise RuntimeError("تنظیمات اتصال به Supabase کامل نیست.")
+    try:
+        response = requests.get(
+            SUPABASE_URL + "/auth/v1/user",
+            headers={
+                "apikey": SUPABASE_SERVICE_ROLE_KEY,
+                "Authorization": authorization,
+            },
+            timeout=15,
+        )
+    except requests.RequestException:
+        raise RuntimeError("بررسی حساب کاربری موقتاً ناموفق بود.")
+    if response.status_code != 200:
+        raise AuthError("نشست ورود معتبر نیست یا منقضی شده است؛ دوباره وارد شوید.")
+    try:
+        user = response.json()
+    except ValueError:
+        raise AuthError("پاسخ احراز هویت معتبر نیست.")
+    user_id = clean(user.get("id"), 80)
+    phone = clean(user.get("phone"), 30)
+    if not user_id or not valid_phone(phone):
+        raise AuthError("حساب کاربری باید شماره موبایل تأییدشده داشته باشد.")
+    return {"id": user_id, "phone": phone}
+
+
+def get_user_profile(user):
+    rows = sb_request(
+        "GET", "/rest/v1/profiles",
+        params={
+            "id": f"eq.{user['id']}",
+            "select": "id,full_name,mobile,is_active",
+            "limit": "1",
+        },
+    ) or []
+    return rows[0] if rows else None
+
+
+def require_complete_profile(user):
+    profile = get_user_profile(user)
+    if not profile:
+        raise ProfileIncompleteError("پروفایل حساب شما هنوز ایجاد نشده است. صفحه را تازه‌سازی کنید یا با پشتیبانی تماس بگیرید.")
+    if profile.get("is_active") is not True:
+        raise AuthError("حساب کاربری شما غیرفعال است. برای پیگیری با پشتیبانی تماس بگیرید.")
+    full_name = clean(profile.get("full_name"), 100)
+    if not full_name:
+        raise ProfileIncompleteError("برای ادامه، ابتدا نام و نام خانوادگی خود را در حساب کاربری تکمیل کنید.")
+    return profile
+
+
+def update_user_profile(user, data):
+    full_name = clean(data.get("full_name"), 100)
+    if len(full_name.split()) < 2 or len(full_name) < 5:
+        raise ValueError("نام و نام خانوادگی کامل را وارد کنید.")
+    existing = get_user_profile(user)
+    if existing and existing.get("is_active") is not True:
+        raise AuthError("حساب کاربری شما غیرفعال است. برای پیگیری با پشتیبانی تماس بگیرید.")
+    if existing:
+        rows = sb_request(
+            "PATCH", "/rest/v1/profiles",
+            params={"id": f"eq.{user['id']}"},
+            payload={"full_name": full_name, "updated_at": now_iso()},
+            prefer="return=representation",
+        ) or []
+    else:
+        rows = sb_request(
+            "POST", "/rest/v1/profiles",
+            payload={
+                "id": user["id"],
+                "full_name": full_name,
+                "mobile": user["phone"],
+                "is_active": True,
+                "created_at": now_iso(),
+                "updated_at": now_iso(),
+            },
+            prefer="return=representation",
+        ) or []
+    if not rows:
+        raise ProfileIncompleteError("ذخیره پروفایل انجام نشد. کمی بعد دوباره تلاش کنید.")
+    role_rows = sb_request(
+        "GET", "/rest/v1/user_roles",
+        params={"user_id": f"eq.{user['id']}", "select": "role", "limit": "1"},
+    ) or []
+    if not role_rows:
+        sb_request(
+            "POST", "/rest/v1/user_roles",
+            payload={"user_id": user["id"], "role": "user"},
+            prefer="resolution=ignore-duplicates,return=minimal",
+        )
+    return rows[0]
+
+
+
+
+def get_user_role(user):
+    rows = sb_request(
+        "GET", "/rest/v1/user_roles",
+        params={"user_id": f"eq.{user['id']}", "select": "role", "limit": "1"},
+    ) or []
+    return rows[0].get("role", "user") if rows else "user"
+
+
+def require_admin(user):
+    profile = require_complete_profile(user)
+    if get_user_role(user) != "admin":
+        raise AuthError("این عملیات فقط برای مدیر سامانه مجاز است.")
+    return profile
+
+
+
+def sb_request_counted(path, params):
+    headers = sb_headers({"Prefer": "count=exact"})
+    response = requests.get(
+        SUPABASE_URL + path, headers=headers, params=params, timeout=SUPABASE_TIMEOUT
+    )
+    if not response.ok:
+        try:
+            body = response.json()
+            detail = body.get("message") or body.get("details") or body.get("hint") or str(body)
+        except Exception:
+            detail = response.text[:400]
+        raise RuntimeError(f"Supabase {response.status_code}: {detail}")
+    try:
+        rows = response.json() if response.content else []
+    except ValueError:
+        rows = []
+    content_range = response.headers.get("Content-Range", "")
+    try:
+        total = int(content_range.rsplit("/", 1)[1])
+    except (IndexError, ValueError):
+        total = len(rows)
+    return rows, total
+
+
+def account_page(value):
+    try:
+        return max(1, min(int(value), 100000))
+    except (TypeError, ValueError):
+        return 1
+
+
+def account_search(value):
+    value = clean(value, 80)
+    return re.sub(r"[^0-9A-Za-z\u0600-\u06FF\s@._+\-]", "", value).strip()
+
+
+def get_account_data(user, query=None):
+    query = query or {}
+    profile = require_complete_profile(user)
+    role = get_user_role(user)
+    admin = role == "admin"
+    per_page = 20
+    listings_page = account_page((query.get("listings_page") or ["1"])[0])
+    requests_page = account_page((query.get("requests_page") or ["1"])[0])
+    listings_status = clean((query.get("listings_status") or ["all"])[0], 20)
+    requests_status = clean((query.get("requests_status") or ["all"])[0], 20)
+    listings_search = account_search((query.get("listings_search") or [""])[0])
+    requests_search = account_search((query.get("requests_search") or [""])[0])
+
+    listing_params = {
+        "select": "id,title,product_type,weight,weight_unit,purity,province,city,description,pricing_method,pricing_value,price,image_url,status,created_at,updated_at,deleted_at,seller_name,seller_mobile,owner_user_id",
+        "order": "created_at.desc",
+        "limit": str(per_page),
+        "offset": str((listings_page - 1) * per_page),
+    }
+    request_params = {
+        "select": "id,listing_id,buyer_name,buyer_mobile,message,status,created_at,updated_at,buyer_user_id",
+        "order": "created_at.desc",
+        "limit": str(per_page),
+        "offset": str((requests_page - 1) * per_page),
+    }
+    if not admin:
+        listing_params["owner_user_id"] = f"eq.{user['id']}"
+        request_params["buyer_user_id"] = f"eq.{user['id']}"
+
+    if listings_status == "deleted":
+        listing_params["deleted_at"] = "not.is.null"
+    else:
+        listing_params["deleted_at"] = "is.null"
+        if listings_status in ("pending", "published", "sold"):
+            listing_params["status"] = f"eq.{listings_status}"
+        elif listings_status != "all":
+            listings_status = "all"
+
+    if requests_status in ("pending", "forwarded"):
+        request_params["status"] = f"eq.{requests_status}"
+    elif requests_status != "all":
+        requests_status = "all"
+
+    if listings_search:
+        term = f"*{listings_search}*"
+        listing_params["or"] = (
+            f"(title.ilike.{term},product_type.ilike.{term},"
+            f"seller_name.ilike.{term},seller_mobile.ilike.{term},city.ilike.{term})"
+        )
+    if requests_search:
+        term = f"*{requests_search}*"
+        request_params["or"] = (
+            f"(buyer_name.ilike.{term},buyer_mobile.ilike.{term},message.ilike.{term})"
+        )
+
+    listings, listings_total = sb_request_counted("/rest/v1/listings", listing_params)
+    requests_rows, requests_total = sb_request_counted("/rest/v1/purchase_requests", request_params)
+
+    titles = {
+        str(item.get("id")): item.get("title") or item.get("product_type") or "آگهی"
+        for item in listings
+    }
+    for request_row in requests_rows:
+        request_row["listing_title"] = titles.get(
+            str(request_row.get("listing_id")),
+            f"آگهی شماره {request_row.get('listing_id')}",
+        )
+        if not admin:
+            request_row.pop("buyer_mobile", None)
+
+    return {
+        "ok": True,
+        "profile": profile,
+        "role": role,
+        "listings": listings,
+        "purchase_requests": requests_rows,
+        "pagination": {
+            "per_page": per_page,
+            "listings": {
+                "page": listings_page,
+                "total": listings_total,
+                "total_pages": max(1, (listings_total + per_page - 1) // per_page),
+                "status": listings_status,
+                "search": listings_search,
+            },
+            "requests": {
+                "page": requests_page,
+                "total": requests_total,
+                "total_pages": max(1, (requests_total + per_page - 1) // per_page),
+                "status": requests_status,
+                "search": requests_search,
+            },
+        },
+    }
+
+def update_listing_status(listing_id, payload, filters):
+    rows = sb_request(
+        "PATCH", "/rest/v1/listings",
+        params=filters,
+        payload={**payload, "updated_at": now_iso()},
+        prefer="return=representation",
+    ) or []
+    if not rows:
+        raise ValueError("آگهی پیدا نشد یا اجازه تغییر آن را ندارید.")
+    return rows[0]
+
+
+def admin_listing_action(user, data):
+    require_admin(user)
+    try:
+        listing_id = int(data.get("listing_id", 0))
+    except (TypeError, ValueError):
+        raise ValueError("شناسه آگهی معتبر نیست.")
+    action = clean(data.get("listing_action"), 30)
+    listing = get_listing(listing_id)
+    if not listing:
+        raise ValueError("آگهی پیدا نشد.")
+    deleted = bool(listing.get("deleted_at"))
+    status = listing.get("status")
+    if action == "publish":
+        if deleted or status != "pending":
+            raise ValueError("فقط آگهی در انتظار و حذف‌نشده قابل انتشار است.")
+        patch, filters = {"status": "published", "published_at": now_iso()}, {"id": f"eq.{listing_id}", "status": "eq.pending", "deleted_at": "is.null"}
+    elif action == "reject":
+        if deleted or status != "pending":
+            raise ValueError("فقط آگهی در انتظار بررسی قابل رد است.")
+        patch, filters = {"deleted_at": now_iso()}, {"id": f"eq.{listing_id}", "status": "eq.pending", "deleted_at": "is.null"}
+    elif action == "sold":
+        if deleted or status != "published":
+            raise ValueError("فقط آگهی منتشرشده را می‌توان فروش‌رفته کرد.")
+        patch, filters = {"status": "sold", "sold_at": now_iso()}, {"id": f"eq.{listing_id}", "status": "eq.published", "deleted_at": "is.null"}
+    elif action == "delete":
+        if deleted:
+            raise ValueError("این آگهی قبلاً حذف شده است.")
+        patch, filters = {"deleted_at": now_iso()}, {"id": f"eq.{listing_id}", "deleted_at": "is.null"}
+    elif action == "restore":
+        if not deleted:
+            raise ValueError("این آگهی حذف نشده است.")
+        patch, filters = {"deleted_at": None}, {"id": f"eq.{listing_id}", "deleted_at": "not.is.null"}
+    else:
+        raise ValueError("عملیات مدیریتی آگهی معتبر نیست.")
+    row = update_listing_status(listing_id, patch, filters)
+    return {"ok": True, "listing": row, "message": "وضعیت آگهی به‌روزرسانی شد."}
+
+
+def owner_listing_action(user, data):
+    require_complete_profile(user)
+    try:
+        listing_id = int(data.get("listing_id", 0))
+    except (TypeError, ValueError):
+        raise ValueError("شناسه آگهی معتبر نیست.")
+    action = clean(data.get("listing_action"), 30)
+    listing = get_listing(listing_id)
+    if not listing or str(listing.get("owner_user_id") or "") != str(user.get("id") or ""):
+        raise ValueError("آگهی پیدا نشد یا متعلق به حساب شما نیست.")
+    if listing.get("deleted_at"):
+        raise ValueError("آگهی حذف‌شده قابل تغییر نیست.")
+    if action == "sold":
+        if listing.get("status") != "published":
+            raise ValueError("فقط آگهی منتشرشده را می‌توانید فروش‌رفته کنید.")
+        patch, filters = {"status": "sold", "sold_at": now_iso()}, {"id": f"eq.{listing_id}", "owner_user_id": f"eq.{user['id']}", "status": "eq.published", "deleted_at": "is.null"}
+    elif action == "delete":
+        patch, filters = {"deleted_at": now_iso()}, {"id": f"eq.{listing_id}", "owner_user_id": f"eq.{user['id']}", "deleted_at": "is.null"}
+    else:
+        raise ValueError("عملیات آگهی معتبر نیست.")
+    row = update_listing_status(listing_id, patch, filters)
+    return {"ok": True, "listing": row, "message": "آگهی شما به‌روزرسانی شد."}
+
+
+def admin_purchase_action(user, data):
+    require_admin(user)
+    try:
+        request_id = int(data.get("request_id", 0))
+    except (TypeError, ValueError):
+        raise ValueError("شناسه درخواست خرید معتبر نیست.")
+    action = clean(data.get("request_action"), 30)
+    if action != "forward":
+        raise ValueError("عملیات درخواست خرید معتبر نیست.")
+    rows = sb_request(
+        "PATCH", "/rest/v1/purchase_requests",
+        params={"id": f"eq.{request_id}", "status": "eq.pending"},
+        payload={"status": "forwarded", "updated_at": now_iso()},
+        prefer="return=representation",
+    ) or []
+    if not rows:
+        raise ValueError("درخواست خرید پیدا نشد یا قبلاً بررسی شده است.")
+    return {"ok": True, "request": rows[0], "message": "درخواست به وضعیت بررسی‌شده تغییر کرد."}
 
 def upload_storage(bucket, path, content, mime):
     encoded_path = "/".join(quote(part, safe="") for part in path.split("/"))
@@ -333,7 +680,8 @@ def send_invoice_to_admin(upload, listing_id):
     return result["result"]
 
 
-def create_listing(fields, uploads):
+def create_listing(fields, uploads, user):
+    profile = require_complete_profile(user)
     photo = check_file(uploads.get("sellerPhoto") or uploads.get("photo"), {"image/jpeg", "image/png", "image/webp"}, "عکس محصول")
     invoice = check_file(uploads.get("sellerInvoice") or uploads.get("invoice"), {"image/jpeg", "image/png", "image/webp", "application/pdf"}, "فاکتور فروش")
     if not sniff_photo(photo["data"]):
@@ -341,15 +689,18 @@ def create_listing(fields, uploads):
     if not sniff_invoice(invoice["data"]):
         raise ValueError("محتوای فاکتور معتبر نیست.")
 
-    seller_name = clean(fields.get("sellerName"), 100)
-    seller_mobile = clean(fields.get("sellerPhone"), 30)
+    seller_name = clean(profile.get("full_name"), 100)
+    seller_mobile = clean(user.get("phone"), 30)
+    submitted_phone = clean(fields.get("sellerPhone"), 30)
     description = clean(fields.get("sellerDescription"), 2000)
     province = clean(fields.get("province"), 100)
     city = clean(fields.get("city"), 100)
     if not all((seller_name, seller_mobile, description, province, city)):
-        raise ValueError("نام، شماره تماس، توضیحات، استان و شهر الزامی هستند.")
+        raise ValueError("اطلاعات پروفایل، شماره تماس، توضیحات، استان و شهر الزامی هستند.")
     if not valid_phone(seller_mobile):
-        raise ValueError("شماره تماس معتبر نیست.")
+        raise ValueError("شماره موبایل تأییدشده حساب معتبر نیست.")
+    if submitted_phone and phone_digits(submitted_phone) != phone_digits(seller_mobile):
+        raise ValueError("شماره تماس آگهی باید با شماره تأییدشده حساب یکسان باشد.")
     if province not in PROVINCES:
         raise ValueError("استان انتخاب‌شده معتبر نیست.")
     if fields.get("invoiceConfirm") not in ("on", "true", "1", "yes", "بله"):
@@ -370,7 +721,7 @@ def create_listing(fields, uploads):
         saved_invoice_path = upload_storage("listing-invoices", invoice_path, invoice["data"], invoice["content_type"])
         invoice_uploaded = True
         row = {
-            "owner_user_id": None,
+            "owner_user_id": user["id"],
             "owner_telegram_id": None,
             "title": title,
             "product_type": product_type,
@@ -463,7 +814,8 @@ def public_listing(item):
     }
 
 
-def save_purchase_request(data):
+def save_purchase_request(data, user):
+    profile = require_complete_profile(user)
     try:
         listing_id = int(data.get("listing_id", 0))
     except (TypeError, ValueError):
@@ -471,12 +823,14 @@ def save_purchase_request(data):
     listing = get_listing(listing_id)
     if not listing or listing.get("status") != "published" or listing.get("deleted_at"):
         raise ValueError("این آگهی دیگر برای خرید در دسترس نیست.")
-    buyer_name = clean(data.get("buyer_name"), 100)
-    buyer_mobile = clean(data.get("buyer_phone") or data.get("buyer_mobile"), 30)
+    buyer_name = clean(profile.get("full_name"), 100)
+    buyer_mobile = clean(user.get("phone"), 30)
     if not buyer_name or not buyer_mobile:
-        raise ValueError("نام و شماره تماس برای ثبت درخواست الزامی است.")
+        raise ValueError("نام و شماره موبایل تأییدشده حساب برای ثبت درخواست الزامی است.")
     if not valid_phone(buyer_mobile):
         raise ValueError("شماره تماس معتبر نیست.")
+    if str(listing.get("owner_user_id") or "") == str(user.get("id") or ""):
+        raise ValueError("برای آگهی خودتان نمی‌توانید درخواست خرید ثبت کنید.")
     if phone_digits(buyer_mobile) == phone_digits(listing.get("seller_mobile")):
         raise ValueError("شماره تماس خریدار و فروشنده نمی‌تواند یکسان باشد.")
     existing = sb_request("GET", "/rest/v1/purchase_requests", params={
@@ -487,7 +841,7 @@ def save_purchase_request(data):
     if existing:
         raise ValueError("درخواست قبلی شما برای این آگهی ثبت شده است.")
     row = {
-        "listing_id": listing_id, "buyer_user_id": None,
+        "listing_id": listing_id, "buyer_user_id": user["id"],
         "buyer_telegram_id": None, "buyer_name": buyer_name,
         "buyer_mobile": phone_digits(buyer_mobile),
         "message": clean(data.get("message") or "درخواست خرید از سایت زرین ماه", 1000),
@@ -522,7 +876,7 @@ def respond(handler, status, payload):
     handler.send_header("Cache-Control", "no-store")
     handler.send_header("Access-Control-Allow-Origin", "*")
     handler.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-    handler.send_header("Access-Control-Allow-Headers", "Content-Type, Accept")
+    handler.send_header("Access-Control-Allow-Headers", "Content-Type, Accept, Authorization")
     handler.send_header("Content-Length", str(len(body)))
     handler.end_headers()
     if status != 204:
@@ -535,6 +889,18 @@ class handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         try:
+            query = parse_qs(self.path.split("?", 1)[1]) if "?" in self.path else {}
+            action = query.get("action", [""])[0]
+            if action == "profile":
+                user = authenticate_user(self)
+                profile = get_user_profile(user)
+                role = get_user_role(user) if profile else "user"
+                respond(self, 200, {"ok": True, "profile": profile, "role": role})
+                return
+            if action == "account":
+                user = authenticate_user(self)
+                respond(self, 200, get_account_data(user, query))
+                return
             # Read directly from listings so deleted_at filtering does not depend on an old RPC.
             rows = sb_request(
                 "GET",
@@ -552,15 +918,48 @@ class handler(BaseHTTPRequestHandler):
                 if row.get("status") in ("published", "sold") and row.get("deleted_at") is None
             ]
             respond(self, 200, {"ok": True, "listings": listings})
+        except AuthError as exc:
+            respond(self, 401, {"ok": False, "error": str(exc)})
+        except ProfileIncompleteError as exc:
+            respond(self, 409, {"ok": False, "code": "PROFILE_INCOMPLETE", "error": str(exc)})
         except Exception as exc:
-            print("PUBLIC LISTINGS ERROR:", str(exc)[:300])
-            respond(self, 500, {"ok": False, "error": "دریافت آگهی‌ها از پایگاه داده ناموفق بود. تنظیمات Supabase و تابع get_public_listings را بررسی کنید."})
+            print("LISTINGS GET ERROR:", str(exc)[:300])
+            respond(self, 500, {"ok": False, "error": "دریافت اطلاعات از پایگاه داده ناموفق بود. گزارش Vercel را بررسی کنید."})
 
     def do_POST(self):
         try:
+            user = authenticate_user(self)
             fields, uploads = parse_body(self)
+            if fields.get("action") == "complete_profile":
+                if PREVIEW_DRY_RUN:
+                    respond(self, 200, {
+                        "ok": True, "preview": True,
+                        "message": "اعتبارسنجی فرم تکمیل پروفایل در حالت آزمایشی انجام شد؛ اطلاعات ذخیره نشد.",
+                    })
+                    return
+                profile = update_user_profile(user, fields)
+                respond(self, 200, {"ok": True, "profile": profile, "message": "پروفایل شما با موفقیت تکمیل شد."})
+                return
+            if fields.get("action") in ("admin_listing_action", "owner_listing_action", "admin_purchase_action"):
+                if PREVIEW_DRY_RUN:
+                    respond(self, 200, {"ok": True, "preview": True, "message": "اعتبارسنجی عملیات پنل در حالت آزمایشی انجام شد؛ تغییری ذخیره نشد."})
+                    return
+                if fields.get("action") == "admin_listing_action":
+                    result = admin_listing_action(user, fields)
+                elif fields.get("action") == "owner_listing_action":
+                    result = owner_listing_action(user, fields)
+                else:
+                    result = admin_purchase_action(user, fields)
+                respond(self, 200, result)
+                return
+            if PREVIEW_DRY_RUN:
+                respond(self, 200, {
+                    "ok": True, "preview": True,
+                    "message": "ورود و ارسال آزمایشی تأیید شد؛ در این نسخه هیچ آگهی، درخواست خرید یا پیام تلگرامی ذخیره و ارسال نشد.",
+                })
+                return
             if not uploads and fields.get("action") == "purchase":
-                request_row, listing = save_purchase_request(fields)
+                request_row, listing = save_purchase_request(fields, user)
                 notified = False
                 try:
                     notify_purchase_admin(request_row, listing)
@@ -573,8 +972,12 @@ class handler(BaseHTTPRequestHandler):
                     "message": "درخواست خرید ثبت شد. از ثبت دوباره خودداری کنید.",
                 })
                 return
-            result = create_listing(fields, uploads)
+            result = create_listing(fields, uploads, user)
             respond(self, 201 if result["admin_notification_sent"] else 202, {"ok": True, **result})
+        except AuthError as exc:
+            respond(self, 401, {"ok": False, "error": str(exc)})
+        except ProfileIncompleteError as exc:
+            respond(self, 409, {"ok": False, "code": "PROFILE_INCOMPLETE", "error": str(exc)})
         except (ValueError, UnicodeDecodeError, json.JSONDecodeError) as exc:
             respond(self, 400, {"ok": False, "error": str(exc)})
         except Exception as exc:
