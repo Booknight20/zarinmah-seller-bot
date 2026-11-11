@@ -106,6 +106,128 @@ def sb_request(method, path, *, params=None, payload=None, raw=None, content_typ
         return None
 
 
+class AuthError(Exception):
+    pass
+
+
+class ProfileIncompleteError(Exception):
+    pass
+
+
+def authenticate_user(handler):
+    authorization = clean(handler.headers.get("Authorization", ""), 2048)
+    if not authorization.startswith("Bearer "):
+        raise AuthError("برای ادامه ابتدا وارد حساب کاربری شوید.")
+    if not SUPABASE_URL or not SUPABASE_SERVICE_ROLE_KEY:
+        raise RuntimeError("تنظیمات اتصال به Supabase کامل نیست.")
+    try:
+        response = requests.get(
+            SUPABASE_URL + "/auth/v1/user",
+            headers={
+                "apikey": SUPABASE_SERVICE_ROLE_KEY,
+                "Authorization": authorization,
+            },
+            timeout=15,
+        )
+    except requests.RequestException:
+        raise RuntimeError("بررسی حساب کاربری موقتاً ناموفق بود.")
+    if response.status_code != 200:
+        raise AuthError("نشست ورود معتبر نیست یا منقضی شده است؛ دوباره وارد شوید.")
+    try:
+        user = response.json()
+    except ValueError:
+        raise AuthError("پاسخ احراز هویت معتبر نیست.")
+    user_id = clean(user.get("id"), 80)
+    phone = clean(user.get("phone"), 30)
+    if not user_id or not valid_phone(phone):
+        raise AuthError("حساب کاربری باید شماره موبایل تأییدشده داشته باشد.")
+    return {"id": user_id, "phone": phone}
+
+
+def get_user_profile(user):
+    rows = sb_request(
+        "GET", "/rest/v1/profiles",
+        params={
+            "id": f"eq.{user['id']}",
+            "select": "id,full_name,mobile,is_active",
+            "limit": "1",
+        },
+    ) or []
+    return rows[0] if rows else None
+
+
+def require_complete_profile(user):
+    profile = get_user_profile(user)
+    if not profile:
+        raise ProfileIncompleteError("پروفایل حساب شما هنوز ایجاد نشده است. صفحه را تازه‌سازی کنید یا با پشتیبانی تماس بگیرید.")
+    if profile.get("is_active") is not True:
+        raise AuthError("حساب کاربری شما غیرفعال است. برای پیگیری با پشتیبانی تماس بگیرید.")
+    full_name = clean(profile.get("full_name"), 100)
+    if not full_name:
+        raise ProfileIncompleteError("برای ادامه، ابتدا نام و نام خانوادگی خود را در حساب کاربری تکمیل کنید.")
+    return profile
+
+
+def update_user_profile(user, data):
+    full_name = clean(data.get("full_name"), 100)
+    if len(full_name.split()) < 2 or len(full_name) < 5:
+        raise ValueError("نام و نام خانوادگی کامل را وارد کنید.")
+    existing = get_user_profile(user)
+    if existing and existing.get("is_active") is not True:
+        raise AuthError("حساب کاربری شما غیرفعال است. برای پیگیری با پشتیبانی تماس بگیرید.")
+    if existing:
+        rows = sb_request(
+            "PATCH", "/rest/v1/profiles",
+            params={"id": f"eq.{user['id']}"},
+            payload={"full_name": full_name, "updated_at": now_iso()},
+            prefer="return=representation",
+        ) or []
+    else:
+        rows = sb_request(
+            "POST", "/rest/v1/profiles",
+            payload={
+                "id": user["id"],
+                "full_name": full_name,
+                "mobile": user["phone"],
+                "is_active": True,
+                "created_at": now_iso(),
+                "updated_at": now_iso(),
+            },
+            prefer="return=representation",
+        ) or []
+    if not rows:
+        raise ProfileIncompleteError("ذخیره پروفایل انجام نشد. کمی بعد دوباره تلاش کنید.")
+    role_rows = sb_request(
+        "GET", "/rest/v1/user_roles",
+        params={"user_id": f"eq.{user['id']}", "select": "role", "limit": "1"},
+    ) or []
+    if not role_rows:
+        sb_request(
+            "POST", "/rest/v1/user_roles",
+            payload={"user_id": user["id"], "role": "user"},
+            prefer="resolution=ignore-duplicates,return=minimal",
+        )
+    return rows[0]
+
+
+
+
+def get_user_role(user):
+    rows = sb_request(
+        "GET", "/rest/v1/user_roles",
+        params={"user_id": f"eq.{user['id']}", "select": "role", "limit": "1"},
+    ) or []
+    return rows[0].get("role", "user") if rows else "user"
+
+
+def require_admin(user):
+    profile = require_complete_profile(user)
+    if get_user_role(user) != "admin":
+        raise AuthError("این عملیات فقط برای مدیر سامانه مجاز است.")
+    return profile
+
+
+
 def sb_request_counted(path, params):
     headers = sb_headers({"Prefer": "count=exact"})
     response = requests.get(
