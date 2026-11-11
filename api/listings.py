@@ -210,6 +210,124 @@ def update_user_profile(user, data):
     return rows[0]
 
 
+
+
+def get_user_role(user):
+    rows = sb_request(
+        "GET", "/rest/v1/user_roles",
+        params={"user_id": f"eq.{user['id']}", "select": "role", "limit": "1"},
+    ) or []
+    return rows[0].get("role", "user") if rows else "user"
+
+
+def require_admin(user):
+    profile = require_complete_profile(user)
+    if get_user_role(user) != "admin":
+        raise AuthError("این عملیات فقط برای مدیر سامانه مجاز است.")
+    return profile
+
+
+def get_account_data(user):
+    profile = require_complete_profile(user)
+    role = get_user_role(user)
+    admin = role == "admin"
+    listing_params = {
+        "select": "id,title,product_type,weight,weight_unit,purity,province,city,description,pricing_method,pricing_value,price,image_url,status,created_at,updated_at,deleted_at,seller_name,seller_mobile,owner_user_id",
+        "order": "created_at.desc",
+        "limit": "100",
+    }
+    request_params = {
+        "select": "id,listing_id,buyer_name,buyer_mobile,message,status,created_at,updated_at,buyer_user_id",
+        "order": "created_at.desc",
+        "limit": "100",
+    }
+    if not admin:
+        listing_params["owner_user_id"] = f"eq.{user['id']}"
+        request_params["buyer_user_id"] = f"eq.{user['id']}"
+    listings = sb_request("GET", "/rest/v1/listings", params=listing_params) or []
+    requests_rows = sb_request("GET", "/rest/v1/purchase_requests", params=request_params) or []
+    titles = {str(item.get("id")): item.get("title") or item.get("product_type") or "آگهی" for item in listings}
+    for request_row in requests_rows:
+        request_row["listing_title"] = titles.get(str(request_row.get("listing_id")), f"آگهی شماره {request_row.get('listing_id')}")
+        if not admin:
+            request_row.pop("buyer_mobile", None)
+    return {
+        "ok": True, "profile": profile, "role": role,
+        "listings": listings, "purchase_requests": requests_rows,
+    }
+
+
+def update_listing_status(listing_id, payload, filters):
+    rows = sb_request(
+        "PATCH", "/rest/v1/listings",
+        params=filters,
+        payload={**payload, "updated_at": now_iso()},
+        prefer="return=representation",
+    ) or []
+    if not rows:
+        raise ValueError("آگهی پیدا نشد یا اجازه تغییر آن را ندارید.")
+    return rows[0]
+
+
+def admin_listing_action(user, data):
+    require_admin(user)
+    try:
+        listing_id = int(data.get("listing_id", 0))
+    except (TypeError, ValueError):
+        raise ValueError("شناسه آگهی معتبر نیست.")
+    action = clean(data.get("listing_action"), 30)
+    actions = {
+        "publish": {"status": "published", "deleted_at": None},
+        "reject": {"status": "rejected", "deleted_at": None},
+        "sold": {"status": "sold", "deleted_at": None},
+        "delete": {"deleted_at": now_iso()},
+        "restore": {"status": "pending", "deleted_at": None},
+    }
+    if action not in actions:
+        raise ValueError("عملیات مدیریتی آگهی معتبر نیست.")
+    row = update_listing_status(listing_id, actions[action], {"id": f"eq.{listing_id}"})
+    return {"ok": True, "listing": row, "message": "وضعیت آگهی به‌روزرسانی شد."}
+
+
+def owner_listing_action(user, data):
+    require_complete_profile(user)
+    try:
+        listing_id = int(data.get("listing_id", 0))
+    except (TypeError, ValueError):
+        raise ValueError("شناسه آگهی معتبر نیست.")
+    action = clean(data.get("listing_action"), 30)
+    if action == "sold":
+        patch = {"status": "sold", "deleted_at": None}
+    elif action == "delete":
+        patch = {"deleted_at": now_iso()}
+    else:
+        raise ValueError("عملیات آگهی معتبر نیست.")
+    row = update_listing_status(
+        listing_id, patch,
+        {"id": f"eq.{listing_id}", "owner_user_id": f"eq.{user['id']}"},
+    )
+    return {"ok": True, "listing": row, "message": "آگهی شما به‌روزرسانی شد."}
+
+
+def admin_purchase_action(user, data):
+    require_admin(user)
+    try:
+        request_id = int(data.get("request_id", 0))
+    except (TypeError, ValueError):
+        raise ValueError("شناسه درخواست خرید معتبر نیست.")
+    action = clean(data.get("request_action"), 30)
+    if action != "forward":
+        raise ValueError("عملیات درخواست خرید معتبر نیست.")
+    rows = sb_request(
+        "PATCH", "/rest/v1/purchase_requests",
+        params={"id": f"eq.{request_id}", "status": "eq.pending"},
+        payload={"status": "forwarded", "updated_at": now_iso()},
+        prefer="return=representation",
+    ) or []
+    if not rows:
+        raise ValueError("درخواست خرید پیدا نشد یا قبلاً بررسی شده است.")
+    return {"ok": True, "request": rows[0], "message": "درخواست به وضعیت بررسی‌شده تغییر کرد."}
+
 def upload_storage(bucket, path, content, mime):
     encoded_path = "/".join(quote(part, safe="") for part in path.split("/"))
     sb_request(
@@ -648,18 +766,16 @@ class handler(BaseHTTPRequestHandler):
     def do_GET(self):
         try:
             query = parse_qs(self.path.split("?", 1)[1]) if "?" in self.path else {}
-            if query.get("action", [""])[0] == "profile":
+            action = query.get("action", [""])[0]
+            if action == "profile":
                 user = authenticate_user(self)
                 profile = get_user_profile(user)
-                if not profile:
-                    respond(self, 200, {"ok": True, "profile": None, "role": "user"})
-                    return
-                roles = sb_request(
-                    "GET", "/rest/v1/user_roles",
-                    params={"user_id": f"eq.{user['id']}", "select": "role", "limit": "1"},
-                ) or []
-                role = roles[0].get("role") if roles else "user"
+                role = get_user_role(user) if profile else "user"
                 respond(self, 200, {"ok": True, "profile": profile, "role": role})
+                return
+            if action == "account":
+                user = authenticate_user(self)
+                respond(self, 200, get_account_data(user))
                 return
             # Read directly from listings so deleted_at filtering does not depend on an old RPC.
             rows = sb_request(
@@ -695,6 +811,18 @@ class handler(BaseHTTPRequestHandler):
                     return
                 profile = update_user_profile(user, fields)
                 respond(self, 200, {"ok": True, "profile": profile, "message": "پروفایل شما با موفقیت تکمیل شد."})
+                return
+            if fields.get("action") in ("admin_listing_action", "owner_listing_action", "admin_purchase_action"):
+                if PREVIEW_DRY_RUN:
+                    respond(self, 200, {"ok": True, "preview": True, "message": "اعتبارسنجی عملیات پنل در حالت آزمایشی انجام شد؛ تغییری ذخیره نشد."})
+                    return
+                if fields.get("action") == "admin_listing_action":
+                    result = admin_listing_action(user, fields)
+                elif fields.get("action") == "owner_listing_action":
+                    result = owner_listing_action(user, fields)
+                else:
+                    result = admin_purchase_action(user, fields)
+                respond(self, 200, result)
                 return
             if PREVIEW_DRY_RUN:
                 respond(self, 200, {
