@@ -509,69 +509,82 @@ def get_admin_storage_usage(user):
         total_bytes = 0
         file_count = 0
         unknown_size_files = 0
-        offset = 0
-        page_size = 1000
         truncated = False
         diagnostics = []
-        while True:
-            objects = sb_request(
-                "POST", f"/storage/v1/object/list/{bucket}",
-                payload={"prefix": "", "limit": page_size, "offset": offset},
-            ) or []
-            if not isinstance(objects, list):
-                raise RuntimeError("پاسخ فهرست فایل‌های Storage معتبر نیست.")
-            for item in objects:
-                file_count += 1
-                metadata = item.get("metadata") or {}
-                size = None
-                if isinstance(metadata, dict):
-                    size = metadata.get("size") or metadata.get("contentLength") or metadata.get("content_length")
-                size = size or item.get("size")
-                try:
-                    size = int(size) if size is not None else None
-                except (TypeError, ValueError):
+        pending_prefixes = [""]
+        visited_prefixes = set()
+        processed_entries = 0
+        page_size = 1000
+
+        while pending_prefixes:
+            prefix = pending_prefixes.pop(0)
+            if prefix in visited_prefixes:
+                continue
+            visited_prefixes.add(prefix)
+            offset = 0
+
+            while True:
+                objects = sb_request(
+                    "POST", f"/storage/v1/object/list/{bucket}",
+                    payload={"prefix": prefix, "limit": page_size, "offset": offset},
+                ) or []
+                if not isinstance(objects, list):
+                    raise RuntimeError("پاسخ فهرست فایل‌های Storage معتبر نیست.")
+
+                for item in objects:
+                    processed_entries += 1
+                    if processed_entries > 10000:
+                        truncated = True
+                        break
+
+                    name = clean(item.get("name"), 1000)
+                    # Supabase returns folders with a null id and files with an id.
+                    if item.get("id") is None:
+                        if name and not name.startswith("/") and all(
+                            part not in ("", ".", "..") for part in name.split("/")
+                        ):
+                            child_prefix = prefix + name.strip("/") + "/"
+                            if child_prefix not in visited_prefixes:
+                                pending_prefixes.append(child_prefix)
+                        continue
+
+                    file_count += 1
+                    metadata = item.get("metadata") or {}
                     size = None
+                    if isinstance(metadata, dict):
+                        for key in ("size", "contentLength", "content_length"):
+                            if metadata.get(key) is not None:
+                                size = metadata.get(key)
+                                break
+                    if size is None:
+                        size = item.get("size")
+                    try:
+                        size = int(size) if size is not None else None
+                    except (TypeError, ValueError):
+                        size = None
 
-                if size is None or size <= 0:
-                    object_name = clean(item.get("name"), 1000)
-                    if object_name and not object_name.startswith("/") and all(part not in ("", ".", "..") for part in object_name.split("/")):
-                        encoded_name = "/".join(quote(part, safe="") for part in object_name.split("/"))
-                        try:
-                            info = sb_request(
-                                "GET", f"/storage/v1/object/info/{bucket}/{encoded_name}",
-                            ) or {}
-                            info_metadata = info.get("metadata") or {}
-                            info_size = info_metadata.get("size") if isinstance(info_metadata, dict) else None
-                            if info_size is None:
-                                info_size = info.get("size")
-                            if info_size is not None:
-                                size = int(info_size)
-                            elif len(diagnostics) < 5:
-                                diagnostics.append({
-                                    "stage": "object_info_no_size",
-                                    "response_keys": sorted(str(k) for k in info.keys())[:30] if isinstance(info, dict) else [],
-                                    "metadata_keys": sorted(str(k) for k in info_metadata.keys())[:30] if isinstance(info_metadata, dict) else [],
-                                    "list_metadata_keys": sorted(str(k) for k in metadata.keys())[:30] if isinstance(metadata, dict) else [],
-                                })
-                        except Exception as exc:
-                            if len(diagnostics) < 5:
-                                diagnostics.append({
-                                    "stage": "object_info_error",
-                                    "error": clean(str(exc), 250),
-                                    "list_metadata_keys": sorted(str(k) for k in metadata.keys())[:30] if isinstance(metadata, dict) else [],
-                                })
+                    if size is None or size < 0:
+                        unknown_size_files += 1
+                        if len(diagnostics) < 5:
+                            diagnostics.append({
+                                "stage": "file_size_missing",
+                                "item_keys": sorted(str(k) for k in item.keys())[:30],
+                                "metadata_keys": sorted(str(k) for k in metadata.keys())[:30] if isinstance(metadata, dict) else [],
+                                "has_file_id": True,
+                            })
+                    else:
+                        total_bytes += size
 
-                if size is None or size < 0:
-                    unknown_size_files += 1
-                else:
-                    total_bytes += size
+                if truncated or len(objects) < page_size:
+                    break
+                offset += page_size
+                if offset >= 10000:
+                    truncated = True
+                    break
 
-            if len(objects) < page_size:
+            if truncated:
                 break
-            offset += page_size
-            if offset >= 10000:
-                truncated = True
-                break
+
         result.append({
             "bucket": bucket,
             "bytes": total_bytes,
