@@ -402,8 +402,20 @@ def get_admin_members(user, query=None):
                 status = row.get("status")
                 if status in ("pending", "published", "sold"):
                     item[status] += 1
+    roles = {}
+    if member_ids:
+        role_rows = sb_request(
+            "GET", "/rest/v1/user_roles",
+            params={
+                "select": "user_id,role",
+                "user_id": "in.(" + ",".join(member_ids) + ")",
+                "limit": "1000",
+            },
+        ) or []
+        roles = {str(row.get("user_id")): row.get("role") or "user" for row in role_rows}
     for member in members:
         member["listing_counts"] = counts.get(str(member.get("id")), {})
+        member["role"] = roles.get(str(member.get("id")), "user")
     return {
         "ok": True,
         "members": members,
