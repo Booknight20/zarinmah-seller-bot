@@ -512,6 +512,7 @@ def get_admin_storage_usage(user):
         offset = 0
         page_size = 1000
         truncated = False
+        diagnostics = []
         while True:
             objects = sb_request(
                 "POST", f"/storage/v1/object/list/{bucket}",
@@ -531,8 +532,6 @@ def get_admin_storage_usage(user):
                 except (TypeError, ValueError):
                     size = None
 
-                # Storage list responses may omit metadata.size. In that case,
-                # use Supabase's metadata-only info endpoint; never download file bytes.
                 if size is None or size <= 0:
                     object_name = clean(item.get("name"), 1000)
                     if object_name and not object_name.startswith("/") and all(part not in ("", ".", "..") for part in object_name.split("/")):
@@ -547,8 +546,20 @@ def get_admin_storage_usage(user):
                                 info_size = info.get("size")
                             if info_size is not None:
                                 size = int(info_size)
-                        except (RuntimeError, TypeError, ValueError):
-                            pass
+                            elif len(diagnostics) < 5:
+                                diagnostics.append({
+                                    "stage": "object_info_no_size",
+                                    "response_keys": sorted(str(k) for k in info.keys())[:30] if isinstance(info, dict) else [],
+                                    "metadata_keys": sorted(str(k) for k in info_metadata.keys())[:30] if isinstance(info_metadata, dict) else [],
+                                    "list_metadata_keys": sorted(str(k) for k in metadata.keys())[:30] if isinstance(metadata, dict) else [],
+                                })
+                        except Exception as exc:
+                            if len(diagnostics) < 5:
+                                diagnostics.append({
+                                    "stage": "object_info_error",
+                                    "error": clean(str(exc), 250),
+                                    "list_metadata_keys": sorted(str(k) for k in metadata.keys())[:30] if isinstance(metadata, dict) else [],
+                                })
 
                 if size is None or size < 0:
                     unknown_size_files += 1
@@ -569,10 +580,9 @@ def get_admin_storage_usage(user):
             "quota_bytes": STORAGE_QUOTA_BYTES,
             "used_percent": round((total_bytes / STORAGE_QUOTA_BYTES) * 100, 2),
             "truncated": truncated,
-            "diagnostics": [],
+            "diagnostics": diagnostics,
         })
     return {"ok": True, "storage": result, "quota_bytes": STORAGE_QUOTA_BYTES}
-
 
 def create_admin_invoice_link(user, listing_id):
     require_admin(user)
