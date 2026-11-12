@@ -532,23 +532,22 @@ def get_admin_storage_usage(user):
                     size = None
 
                 # Storage list responses may omit metadata.size. In that case,
-                # read only the object's headers; never download its contents.
+                # use Supabase's metadata-only info endpoint; never download file bytes.
                 if size is None or size <= 0:
                     object_name = clean(item.get("name"), 1000)
                     if object_name and not object_name.startswith("/") and all(part not in ("", ".", "..") for part in object_name.split("/")):
                         encoded_name = "/".join(quote(part, safe="") for part in object_name.split("/"))
                         try:
-                            head = requests.head(
-                                SUPABASE_URL + f"/storage/v1/object/{bucket}/{encoded_name}",
-                                headers=sb_headers(),
-                                timeout=SUPABASE_TIMEOUT,
-                                allow_redirects=True,
-                            )
-                            if head.ok:
-                                content_length = head.headers.get("Content-Length")
-                                if content_length and content_length.isdigit():
-                                    size = int(content_length)
-                        except requests.RequestException:
+                            info = sb_request(
+                                "GET", f"/storage/v1/object/info/{bucket}/{encoded_name}",
+                            ) or {}
+                            info_metadata = info.get("metadata") or {}
+                            info_size = info_metadata.get("size") if isinstance(info_metadata, dict) else None
+                            if info_size is None:
+                                info_size = info.get("size")
+                            if info_size is not None:
+                                size = int(info_size)
+                        except (RuntimeError, TypeError, ValueError):
                             pass
 
                 if size is None or size < 0:
