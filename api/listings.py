@@ -511,6 +511,7 @@ def get_admin_storage_usage(user):
         offset = 0
         page_size = 1000
         truncated = False
+        diagnostics = []
         while True:
             objects = sb_request(
                 "POST", f"/storage/v1/object/list/{bucket}",
@@ -526,6 +527,20 @@ def get_admin_storage_usage(user):
                     size = 0
                 total_bytes += max(0, size)
                 file_count += 1
+                # Diagnostic only: expose field names and size-like values, never object names or paths.
+                if len(diagnostics) < 3:
+                    candidates = {}
+                    for source_name, source in (("item", item), ("metadata", metadata)):
+                        if isinstance(source, dict):
+                            for key in ("size", "contentLength", "content_length", "bytes", "file_size"):
+                                value = source.get(key)
+                                if value is not None and isinstance(value, (str, int, float)):
+                                    candidates[f"{source_name}.{key}"] = str(value)[:40]
+                    diagnostics.append({
+                        "item_fields": sorted(str(key) for key in item.keys()),
+                        "metadata_fields": sorted(str(key) for key in metadata.keys()) if isinstance(metadata, dict) else [],
+                        "size_candidates": candidates,
+                    })
             if len(objects) < page_size:
                 break
             offset += page_size
@@ -539,6 +554,7 @@ def get_admin_storage_usage(user):
             "quota_bytes": STORAGE_QUOTA_BYTES,
             "used_percent": round((total_bytes / STORAGE_QUOTA_BYTES) * 100, 2),
             "truncated": truncated,
+            "diagnostics": diagnostics,
         })
     return {"ok": True, "storage": result, "quota_bytes": STORAGE_QUOTA_BYTES}
 
