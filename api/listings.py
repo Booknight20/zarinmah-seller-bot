@@ -20,6 +20,8 @@ SUPABASE_TIMEOUT = 30
 PREVIEW_DRY_RUN = os.environ.get("ZARINMAH_PREVIEW_DRY_RUN", "").strip().lower() == "true"
 MAX_BODY_SIZE = 4 * 1024 * 1024
 MAX_FILE_SIZE = 1536 * 1024
+MAX_PHOTO_SIZE = 500 * 1024
+STORAGE_QUOTA_BYTES = 1024 * 1024 * 1024
 
 PROVINCES = {
     "آذربایجان شرقی", "آذربایجان غربی", "اردبیل", "اصفهان", "البرز",
@@ -499,6 +501,48 @@ def admin_member_update(user, data):
     return {"ok": True, "member": rows[0], "message": "اطلاعات عضو به‌روزرسانی شد."}
 
 
+def get_admin_storage_usage(user):
+    require_admin(user)
+    buckets = ("listing-images", "listing-invoices")
+    result = []
+    for bucket in buckets:
+        total_bytes = 0
+        file_count = 0
+        offset = 0
+        page_size = 1000
+        truncated = False
+        while True:
+            objects = sb_request(
+                "POST", f"/storage/v1/object/list/{bucket}",
+                payload={"prefix": "", "limit": page_size, "offset": offset},
+            ) or []
+            if not isinstance(objects, list):
+                raise RuntimeError("پاسخ فهرست فایل‌های Storage معتبر نیست.")
+            for item in objects:
+                metadata = item.get("metadata") or {}
+                try:
+                    size = int(metadata.get("size") or item.get("size") or 0)
+                except (TypeError, ValueError):
+                    size = 0
+                total_bytes += max(0, size)
+                file_count += 1
+            if len(objects) < page_size:
+                break
+            offset += page_size
+            if offset >= 10000:
+                truncated = True
+                break
+        result.append({
+            "bucket": bucket,
+            "bytes": total_bytes,
+            "files": file_count,
+            "quota_bytes": STORAGE_QUOTA_BYTES,
+            "used_percent": round((total_bytes / STORAGE_QUOTA_BYTES) * 100, 2),
+            "truncated": truncated,
+        })
+    return {"ok": True, "storage": result, "quota_bytes": STORAGE_QUOTA_BYTES}
+
+
 def create_admin_invoice_link(user, listing_id):
     require_admin(user)
     try:
@@ -687,11 +731,12 @@ def parse_body(handler):
     raise ValueError("نوع درخواست پشتیبانی نمی‌شود.")
 
 
-def check_file(upload, allowed, label):
+def check_file(upload, allowed, label, max_size=MAX_FILE_SIZE):
     if not upload or not upload.get("data"):
         raise ValueError(f"ارسال {label} الزامی است.")
-    if len(upload["data"]) > MAX_FILE_SIZE:
-        raise ValueError(f"حجم {label} نباید بیشتر از ۱٫۵ مگابایت باشد.")
+    if len(upload["data"]) > max_size:
+        limit_mb = "۵۰۰ کیلوبایت" if max_size == MAX_PHOTO_SIZE else "۱٫۵ مگابایت"
+        raise ValueError(f"حجم {label} نباید بیشتر از {limit_mb} باشد.")
     if upload["content_type"] not in allowed:
         raise ValueError(f"فرمت {label} مجاز نیست.")
     return upload
@@ -854,7 +899,7 @@ def send_invoice_to_admin(upload, listing_id):
 
 def create_listing(fields, uploads, user):
     profile = require_complete_profile(user)
-    photo = check_file(uploads.get("sellerPhoto") or uploads.get("photo"), {"image/jpeg", "image/png", "image/webp"}, "عکس محصول")
+    photo = check_file(uploads.get("sellerPhoto") or uploads.get("photo"), {"image/jpeg", "image/png", "image/webp"}, "عکس محصول", max_size=MAX_PHOTO_SIZE)
     invoice = check_file(uploads.get("sellerInvoice") or uploads.get("invoice"), {"image/jpeg", "image/png", "image/webp", "application/pdf"}, "فاکتور فروش")
     if not sniff_photo(photo["data"]):
         raise ValueError("محتوای عکس محصول معتبر نیست.")
@@ -1080,6 +1125,10 @@ class handler(BaseHTTPRequestHandler):
             if action == "admin_member_listings":
                 user = authenticate_user(self)
                 respond(self, 200, get_admin_member_listings(user, query))
+                return
+            if action == "admin_storage_usage":
+                user = authenticate_user(self)
+                respond(self, 200, get_admin_storage_usage(user))
                 return
             if action == "admin_invoice":
                 user = authenticate_user(self)
