@@ -429,6 +429,52 @@ def get_admin_members(user, query=None):
     }
 
 
+def get_admin_member_listings(user, query=None):
+    require_admin(user)
+    query = query or {}
+    member_id = clean((query.get("member_id") or [""])[0], 80)
+    if not re.fullmatch(r"[0-9a-fA-F-]{36}", member_id):
+        raise ValueError("شناسه عضو معتبر نیست.")
+    page = account_page((query.get("member_listings_page") or ["1"])[0])
+    per_page = 10
+    status = clean((query.get("member_listings_status") or ["all"])[0], 20)
+    params = {
+        "select": "id,title,product_type,weight,weight_unit,purity,province,city,description,pricing_method,pricing_value,price,image_url,status,created_at,updated_at,deleted_at,invoice_path",
+        "owner_user_id": f"eq.{member_id}",
+        "order": "created_at.desc",
+        "limit": str(per_page),
+        "offset": str((page - 1) * per_page),
+    }
+    if status == "deleted":
+        params["deleted_at"] = "not.is.null"
+    else:
+        params["deleted_at"] = "is.null"
+        if status in ("pending", "published", "sold"):
+            params["status"] = f"eq.{status}"
+        elif status != "all":
+            status = "all"
+    rows, total = sb_request_counted("/rest/v1/listings", params)
+    listings = []
+    for row in rows:
+        item = public_listing(row)
+        item["updated_at"] = row.get("updated_at")
+        item["deleted_at"] = row.get("deleted_at")
+        item["invoice_available"] = bool(row.get("invoice_path"))
+        listings.append(item)
+    return {
+        "ok": True,
+        "member_id": member_id,
+        "listings": listings,
+        "pagination": {
+            "page": page,
+            "per_page": per_page,
+            "total": total,
+            "total_pages": max(1, (total + per_page - 1) // per_page),
+            "status": status,
+        },
+    }
+
+
 def admin_member_update(user, data):
     require_admin(user)
     member_id = clean(data.get("member_id"), 80)
@@ -1023,6 +1069,10 @@ class handler(BaseHTTPRequestHandler):
             if action == "admin_members":
                 user = authenticate_user(self)
                 respond(self, 200, get_admin_members(user, query))
+                return
+            if action == "admin_member_listings":
+                user = authenticate_user(self)
+                respond(self, 200, get_admin_member_listings(user, query))
                 return
             if action == "admin_invoice":
                 user = authenticate_user(self)
