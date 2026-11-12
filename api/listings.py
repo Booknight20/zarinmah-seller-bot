@@ -535,8 +535,8 @@ def get_admin_storage_usage(user):
                 # read only the object's headers; never download its contents.
                 if size is None or size <= 0:
                     object_name = clean(item.get("name"), 1000)
-                    if object_name and "/" not in object_name and ".." not in object_name.split("/"):
-                        encoded_name = quote(object_name, safe="")
+                    if object_name and not object_name.startswith("/") and all(part not in ("", ".", "..") for part in object_name.split("/")):
+                        encoded_name = "/".join(quote(part, safe="") for part in object_name.split("/"))
                         try:
                             head = requests.head(
                                 SUPABASE_URL + f"/storage/v1/object/{bucket}/{encoded_name}",
