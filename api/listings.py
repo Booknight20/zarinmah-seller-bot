@@ -519,8 +519,15 @@ def create_admin_invoice_link(user, listing_id):
     signed = result.get("signedURL") or result.get("signedUrl")
     if not signed:
         raise RuntimeError("ساخت لینک موقت فاکتور ناموفق بود.")
-    if signed.startswith("/"):
+    if signed.startswith("http://") or signed.startswith("https://"):
+        pass
+    elif signed.startswith("/storage/v1/"):
         signed = SUPABASE_URL + signed
+    elif signed.startswith("/"):
+        # Supabase Storage returns paths relative to the Storage API base.
+        signed = SUPABASE_URL + "/storage/v1" + signed
+    else:
+        signed = SUPABASE_URL + "/storage/v1/" + signed.lstrip("/")
     return {"ok": True, "url": signed, "expires_in": 90}
 
 
