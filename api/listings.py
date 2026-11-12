@@ -359,6 +359,113 @@ def get_account_data(user, query=None):
         },
     }
 
+
+def get_admin_members(user, query=None):
+    require_admin(user)
+    query = query or {}
+    page = account_page((query.get("members_page") or ["1"])[0])
+    search = account_search((query.get("members_search") or [""])[0])
+    per_page = 20
+    params = {
+        "select": "id,full_name,mobile,is_active,created_at",
+        "order": "created_at.desc",
+        "limit": str(per_page),
+        "offset": str((page - 1) * per_page),
+    }
+    if search:
+        term = f"*{search}*"
+        params["or"] = f"(full_name.ilike.{term},mobile.ilike.{term})"
+    members, total = sb_request_counted("/rest/v1/profiles", params)
+    member_ids = [str(item.get("id")) for item in members if item.get("id")]
+    counts = {}
+    for member_id in member_ids:
+        counts[member_id] = {"total": 0, "active": 0, "pending": 0, "published": 0, "sold": 0, "deleted": 0}
+    if member_ids:
+        rows = sb_request(
+            "GET", "/rest/v1/listings",
+            params={
+                "select": "owner_user_id,status,deleted_at",
+                "owner_user_id": "in.(" + ",".join(member_ids) + ")",
+                "limit": "10000",
+            },
+        ) or []
+        for row in rows:
+            owner = str(row.get("owner_user_id") or "")
+            if owner not in counts:
+                continue
+            item = counts[owner]
+            item["total"] += 1
+            if row.get("deleted_at") is not None:
+                item["deleted"] += 1
+            else:
+                item["active"] += 1
+                status = row.get("status")
+                if status in ("pending", "published", "sold"):
+                    item[status] += 1
+    for member in members:
+        member["listing_counts"] = counts.get(str(member.get("id")), {})
+    return {
+        "ok": True,
+        "members": members,
+        "pagination": {
+            "page": page,
+            "per_page": per_page,
+            "total": total,
+            "total_pages": max(1, (total + per_page - 1) // per_page),
+            "search": search,
+        },
+    }
+
+
+def admin_member_update(user, data):
+    require_admin(user)
+    member_id = clean(data.get("member_id"), 80)
+    if not re.fullmatch(r"[0-9a-fA-F-]{36}", member_id):
+        raise ValueError("شناسه عضو معتبر نیست.")
+    if member_id == user["id"] and data.get("is_active") is False:
+        raise ValueError("برای جلوگیری از قفل‌شدن پنل، نمی‌توانید حساب خودتان را غیرفعال کنید.")
+    full_name = clean(data.get("full_name"), 100)
+    if len(full_name.split()) < 2 or len(full_name) < 5:
+        raise ValueError("نام و نام خانوادگی معتبر وارد کنید.")
+    active_value = data.get("is_active")
+    if not isinstance(active_value, bool):
+        raise ValueError("وضعیت فعال‌بودن حساب معتبر نیست.")
+    rows = sb_request(
+        "PATCH", "/rest/v1/profiles",
+        params={"id": f"eq.{member_id}"},
+        payload={"full_name": full_name, "is_active": active_value, "updated_at": now_iso()},
+        prefer="return=representation",
+    ) or []
+    if not rows:
+        raise ValueError("عضو پیدا نشد یا اطلاعات او به‌روزرسانی نشد.")
+    return {"ok": True, "member": rows[0], "message": "اطلاعات عضو به‌روزرسانی شد."}
+
+
+def create_admin_invoice_link(user, listing_id):
+    require_admin(user)
+    try:
+        listing_id = int(listing_id)
+    except (TypeError, ValueError):
+        raise ValueError("شناسه آگهی معتبر نیست.")
+    listing = get_listing(listing_id)
+    if not listing:
+        raise ValueError("آگهی پیدا نشد.")
+    path = clean(listing.get("invoice_path"), 500)
+    if not path or path.startswith("/") or ".." in path.split("/"):
+        raise ValueError("فاکتور خصوصی برای این آگهی ثبت نشده است.")
+    encoded_path = "/".join(quote(part, safe="") for part in path.split("/"))
+    result = sb_request(
+        "POST", f"/storage/v1/object/sign/listing-invoices/{encoded_path}",
+        payload={"expiresIn": 90},
+    ) or {}
+    signed = result.get("signedURL") or result.get("signedUrl")
+    if not signed:
+        raise RuntimeError("ساخت لینک موقت فاکتور ناموفق بود.")
+    if signed.startswith("/"):
+        signed = SUPABASE_URL + signed
+    return {"ok": True, "url": signed, "expires_in": 90}
+
+
 def update_listing_status(listing_id, payload, filters):
     rows = sb_request(
         "PATCH", "/rest/v1/listings",
@@ -901,6 +1008,15 @@ class handler(BaseHTTPRequestHandler):
                 user = authenticate_user(self)
                 respond(self, 200, get_account_data(user, query))
                 return
+            if action == "admin_members":
+                user = authenticate_user(self)
+                respond(self, 200, get_admin_members(user, query))
+                return
+            if action == "admin_invoice":
+                user = authenticate_user(self)
+                result = create_admin_invoice_link(user, (query.get("listing_id") or [""])[0])
+                respond(self, 200, result)
+                return
             # Read directly from listings so deleted_at filtering does not depend on an old RPC.
             rows = sb_request(
                 "GET",
@@ -939,6 +1055,14 @@ class handler(BaseHTTPRequestHandler):
                     return
                 profile = update_user_profile(user, fields)
                 respond(self, 200, {"ok": True, "profile": profile, "message": "پروفایل شما با موفقیت تکمیل شد."})
+                return
+            if fields.get("action") == "admin_member_update":
+                require_admin(user)
+                if PREVIEW_DRY_RUN:
+                    respond(self, 200, {"ok": True, "preview": True, "message": "حالت آزمایشی: تغییر حساب ذخیره نشد."})
+                    return
+                result = admin_member_update(user, fields)
+                respond(self, 200, result)
                 return
             if fields.get("action") in ("admin_listing_action", "owner_listing_action", "admin_purchase_action"):
                 if PREVIEW_DRY_RUN:
