@@ -508,10 +508,10 @@ def get_admin_storage_usage(user):
     for bucket in buckets:
         total_bytes = 0
         file_count = 0
+        unknown_size_files = 0
         offset = 0
         page_size = 1000
         truncated = False
-        diagnostics = []
         while True:
             objects = sb_request(
                 "POST", f"/storage/v1/object/list/{bucket}",
@@ -520,27 +520,42 @@ def get_admin_storage_usage(user):
             if not isinstance(objects, list):
                 raise RuntimeError("پاسخ فهرست فایل‌های Storage معتبر نیست.")
             for item in objects:
-                metadata = item.get("metadata") or {}
-                try:
-                    size = int(metadata.get("size") or item.get("size") or 0)
-                except (TypeError, ValueError):
-                    size = 0
-                total_bytes += max(0, size)
                 file_count += 1
-                # Diagnostic only: expose field names and size-like values, never object names or paths.
-                if len(diagnostics) < 3:
-                    candidates = {}
-                    for source_name, source in (("item", item), ("metadata", metadata)):
-                        if isinstance(source, dict):
-                            for key in ("size", "contentLength", "content_length", "bytes", "file_size"):
-                                value = source.get(key)
-                                if value is not None and isinstance(value, (str, int, float)):
-                                    candidates[f"{source_name}.{key}"] = str(value)[:40]
-                    diagnostics.append({
-                        "item_fields": sorted(str(key) for key in item.keys()),
-                        "metadata_fields": sorted(str(key) for key in metadata.keys()) if isinstance(metadata, dict) else [],
-                        "size_candidates": candidates,
-                    })
+                metadata = item.get("metadata") or {}
+                size = None
+                if isinstance(metadata, dict):
+                    size = metadata.get("size") or metadata.get("contentLength") or metadata.get("content_length")
+                size = size or item.get("size")
+                try:
+                    size = int(size) if size is not None else None
+                except (TypeError, ValueError):
+                    size = None
+
+                # Storage list responses may omit metadata.size. In that case,
+                # read only the object's headers; never download its contents.
+                if size is None or size <= 0:
+                    object_name = clean(item.get("name"), 1000)
+                    if object_name and "/" not in object_name and ".." not in object_name.split("/"):
+                        encoded_name = quote(object_name, safe="")
+                        try:
+                            head = requests.head(
+                                SUPABASE_URL + f"/storage/v1/object/{bucket}/{encoded_name}",
+                                headers=sb_headers(),
+                                timeout=SUPABASE_TIMEOUT,
+                                allow_redirects=True,
+                            )
+                            if head.ok:
+                                content_length = head.headers.get("Content-Length")
+                                if content_length and content_length.isdigit():
+                                    size = int(content_length)
+                        except requests.RequestException:
+                            pass
+
+                if size is None or size < 0:
+                    unknown_size_files += 1
+                else:
+                    total_bytes += size
+
             if len(objects) < page_size:
                 break
             offset += page_size
@@ -551,10 +566,11 @@ def get_admin_storage_usage(user):
             "bucket": bucket,
             "bytes": total_bytes,
             "files": file_count,
+            "unknown_size_files": unknown_size_files,
             "quota_bytes": STORAGE_QUOTA_BYTES,
             "used_percent": round((total_bytes / STORAGE_QUOTA_BYTES) * 100, 2),
             "truncated": truncated,
-            "diagnostics": diagnostics,
+            "diagnostics": [],
         })
     return {"ok": True, "storage": result, "quota_bytes": STORAGE_QUOTA_BYTES}
 
