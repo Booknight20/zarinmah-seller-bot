@@ -18,6 +18,8 @@ SUPABASE_URL = os.environ.get("SUPABASE_URL", "").rstrip("/")
 SUPABASE_SERVICE_ROLE_KEY = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "")
 SUPABASE_TIMEOUT = 30
 PREVIEW_DRY_RUN = os.environ.get("ZARINMAH_PREVIEW_DRY_RUN", "").strip().lower() == "true"
+# Enable only after the image_url_2 database migration has been applied.
+SECOND_IMAGE_ENABLED = os.environ.get("ZARINMAH_SECOND_IMAGE_ENABLED", "").strip().lower() == "true"
 MAX_BODY_SIZE = 4 * 1024 * 1024
 MAX_FILE_SIZE = 1536 * 1024
 MAX_PHOTO_SIZE = 500 * 1024
@@ -280,7 +282,7 @@ def get_account_data(user, query=None):
     requests_search = account_search((query.get("requests_search") or [""])[0])
 
     listing_params = {
-        "select": "id,title,product_type,weight,weight_unit,purity,province,city,description,pricing_method,pricing_value,price,image_url,status,created_at,updated_at,deleted_at,seller_name,seller_mobile,owner_user_id",
+        "select": "id,title,product_type,weight,weight_unit,purity,province,city,description,pricing_method,pricing_value,price,image_url" + (",image_url_2" if SECOND_IMAGE_ENABLED else "") + ",status,created_at,updated_at,deleted_at,seller_name,seller_mobile,owner_user_id",
         "order": "created_at.desc",
         "limit": str(per_page),
         "offset": str((listings_page - 1) * per_page),
@@ -441,7 +443,7 @@ def get_admin_member_listings(user, query=None):
     per_page = 10
     status = clean((query.get("member_listings_status") or ["all"])[0], 20)
     params = {
-        "select": "id,title,product_type,weight,weight_unit,purity,province,city,description,pricing_method,pricing_value,price,image_url,status,created_at,updated_at,deleted_at,invoice_path",
+        "select": "id,title,product_type,weight,weight_unit,purity,province,city,description,pricing_method,pricing_value,price,image_url" + (",image_url_2" if SECOND_IMAGE_ENABLED else "") + ",status,created_at,updated_at,deleted_at,invoice_path",
         "owner_user_id": f"eq.{member_id}",
         "order": "created_at.desc",
         "limit": str(per_page),
@@ -954,6 +956,13 @@ def send_invoice_to_admin(upload, listing_id):
 def create_listing(fields, uploads, user):
     profile = require_complete_profile(user)
     photo = check_file(uploads.get("sellerPhoto") or uploads.get("photo"), {"image/jpeg", "image/png", "image/webp"}, "عکس محصول", max_size=MAX_PHOTO_SIZE)
+    second_photo = uploads.get("sellerPhoto2")
+    if second_photo:
+        second_photo = check_file(second_photo, {"image/jpeg", "image/png", "image/webp"}, "عکس دوم محصول", max_size=MAX_PHOTO_SIZE)
+        if not sniff_photo(second_photo["data"]):
+            raise ValueError("محتوای عکس دوم محصول معتبر نیست.")
+        if not SECOND_IMAGE_ENABLED:
+            raise ValueError("ثبت عکس دوم هنوز فعال نشده است؛ پس از تکمیل به‌روزرسانی پایگاه داده فعال می‌شود.")
     invoice = check_file(uploads.get("sellerInvoice") or uploads.get("invoice"), {"image/jpeg", "image/png", "image/webp", "application/pdf"}, "فاکتور فروش")
     if not sniff_photo(photo["data"]):
         raise ValueError("محتوای عکس محصول معتبر نیست.")
@@ -984,11 +993,20 @@ def create_listing(fields, uploads, user):
     photo_ext = {"image/jpeg": "jpg", "image/png": "png", "image/webp": "webp"}[photo["content_type"]]
     invoice_ext = {"application/pdf": "pdf", "image/jpeg": "jpg", "image/png": "png", "image/webp": "webp"}[invoice["content_type"]]
     photo_path = f"website/{token}.{photo_ext}"
+    second_photo_ext = None
+    second_photo_path = None
+    if second_photo:
+        second_photo_ext = {"image/jpeg": "jpg", "image/png": "png", "image/webp": "webp"}[second_photo["content_type"]]
+        second_photo_path = f"website/{token}-2.{second_photo_ext}"
     invoice_path = f"website/{token}.{invoice_ext}"
-    photo_uploaded = invoice_uploaded = False
+    photo_uploaded = second_photo_uploaded = invoice_uploaded = False
     try:
         image_url = upload_storage("listing-images", photo_path, photo["data"], photo["content_type"])
         photo_uploaded = True
+        image_url_2 = None
+        if second_photo:
+            image_url_2 = upload_storage("listing-images", second_photo_path, second_photo["data"], second_photo["content_type"])
+            second_photo_uploaded = True
         saved_invoice_path = upload_storage("listing-invoices", invoice_path, invoice["data"], invoice["content_type"])
         invoice_uploaded = True
         row = {
@@ -1013,6 +1031,8 @@ def create_listing(fields, uploads, user):
             "city": city,
             "invoice_path": saved_invoice_path,
         }
+        if SECOND_IMAGE_ENABLED:
+            row["image_url_2"] = image_url_2
         inserted = sb_request("POST", "/rest/v1/listings", payload=row, prefer="return=representation")
         if not inserted:
             raise RuntimeError("شناسه آگهی از Supabase دریافت نشد.")
@@ -1027,6 +1047,7 @@ def create_listing(fields, uploads, user):
             "_weight_unit_label": "سوت" if weight_unit == "soot" else "گرم",
             "_price_label": price_label,
             "image_url": image_url,
+            "image_url_2": image_url_2,
         }
         invoice_sent = False
         try:
@@ -1048,6 +1069,8 @@ def create_listing(fields, uploads, user):
     except Exception:
         if invoice_uploaded:
             delete_storage("listing-invoices", invoice_path)
+        if second_photo_uploaded:
+            delete_storage("listing-images", second_photo_path)
         if photo_uploaded:
             delete_storage("listing-images", photo_path)
         raise
@@ -1081,6 +1104,7 @@ def public_listing(item):
         "description": item.get("description"), "pricing_method": method,
         "pricing_value": value, "price": price_label,
         "photo_url": item.get("image_url"), "image_url": item.get("image_url"),
+        "photo_url_2": item.get("image_url_2"), "image_url_2": item.get("image_url_2"),
         "created_at": item.get("created_at"), "status": item.get("status"),
     }
 
@@ -1194,7 +1218,7 @@ class handler(BaseHTTPRequestHandler):
                 "GET",
                 "/rest/v1/listings",
                 params={
-                    "select": "id,title,product_type,weight,weight_unit,purity,province,city,description,pricing_method,pricing_value,price,image_url,created_at,status,deleted_at",
+                    "select": "id,title,product_type,weight,weight_unit,purity,province,city,description,pricing_method,pricing_value,price,image_url" + (",image_url_2" if SECOND_IMAGE_ENABLED else "") + ",created_at,status,deleted_at",
                     "status": "in.(published,sold)",
                     "deleted_at": "is.null",
                     "order": "created_at.desc",
