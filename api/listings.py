@@ -1249,9 +1249,21 @@ class handler(BaseHTTPRequestHandler):
                 respond(self, 200, result)
                 return
             if PREVIEW_DRY_RUN:
+                if uploads:
+                    photo = check_file(uploads.get("sellerPhoto"), {"image/jpeg", "image/png", "image/webp"}, "عکس اول محصول", max_size=MAX_PHOTO_SIZE)
+                    if not sniff_photo(photo["data"]):
+                        raise ValueError("محتوای عکس اول محصول معتبر نیست.")
+                    second_photo = uploads.get("sellerPhoto2")
+                    if second_photo:
+                        second_photo = check_file(second_photo, {"image/jpeg", "image/png", "image/webp"}, "عکس دوم محصول", max_size=MAX_PHOTO_SIZE)
+                        if not sniff_photo(second_photo["data"]):
+                            raise ValueError("محتوای عکس دوم محصول معتبر نیست.")
+                    invoice = check_file(uploads.get("sellerInvoice"), {"image/jpeg", "image/png", "image/webp", "application/pdf"}, "فاکتور فروش")
+                    if not sniff_invoice(invoice["data"]):
+                        raise ValueError("محتوای فاکتور فروش معتبر نیست.")
                 respond(self, 200, {
                     "ok": True, "preview": True,
-                    "message": "ورود و ارسال آزمایشی تأیید شد؛ در این نسخه هیچ آگهی، درخواست خرید یا پیام تلگرامی ذخیره و ارسال نشد.",
+                    "message": "اعتبارسنجی عکس اول، عکس دوم (در صورت انتخاب) و فاکتور انجام شد؛ هیچ آگهی یا فایلی ذخیره نشد.",
                 })
                 return
             if not uploads and fields.get("action") == "purchase":
