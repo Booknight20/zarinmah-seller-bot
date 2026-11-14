@@ -312,11 +312,23 @@ def get_user_role(user):
     return rows[0].get("role", "user") if rows else "user"
 
 
-def require_admin(user):
+def require_roles(user, allowed_roles, message="این عملیات برای نقش کاربری شما مجاز نیست."):
     profile = require_complete_profile(user)
-    if get_user_role(user) != "admin":
-        raise AuthError("این عملیات فقط برای مدیر سامانه مجاز است.")
+    if get_user_role(user) not in set(allowed_roles):
+        raise AuthError(message)
     return profile
+
+
+def require_admin(user):
+    return require_roles(user, {"admin"}, "این عملیات فقط برای مدیر کل سامانه مجاز است.")
+
+
+def require_listing_manager(user):
+    return require_roles(user, {"admin", "listing_manager"}, "این عملیات فقط برای مدیر آگهی‌ها یا مدیر کل مجاز است.")
+
+
+def require_member_manager(user):
+    return require_roles(user, {"admin", "member_manager"}, "این عملیات فقط برای مدیر اعضا یا مدیر کل مجاز است.")
 
 
 
@@ -361,6 +373,7 @@ def get_account_data(user, query=None):
     profile = require_complete_profile(user)
     role = get_user_role(user)
     admin = role == "admin"
+    listing_staff = role in {"admin", "listing_manager"}
     per_page = 20
     listings_page = account_page((query.get("listings_page") or ["1"])[0])
     requests_page = account_page((query.get("requests_page") or ["1"])[0])
@@ -381,8 +394,9 @@ def get_account_data(user, query=None):
         "limit": str(per_page),
         "offset": str((requests_page - 1) * per_page),
     }
-    if not admin:
+    if not listing_staff:
         listing_params["owner_user_id"] = f"eq.{user['id']}"
+    if not listing_staff:
         request_params["buyer_user_id"] = f"eq.{user['id']}"
 
     if listings_status == "deleted":
@@ -459,7 +473,7 @@ def get_account_data(user, query=None):
             str(request_row.get("listing_id")),
             f"آگهی شماره {request_row.get('listing_id')}",
         )
-        if not admin:
+        if not listing_staff:
             request_row.pop("buyer_mobile", None)
 
     return {
@@ -489,13 +503,17 @@ def get_account_data(user, query=None):
 
 
 def get_admin_members(user, query=None):
-    require_admin(user)
+    require_member_manager(user)
     query = query or {}
     page = account_page((query.get("members_page") or ["1"])[0])
     search = account_search((query.get("members_search") or [""])[0])
     per_page = 20
+    include_national_id = get_user_role(user) == "admin"
+    profile_fields = "id,full_name,mobile,province,city,address,is_active,created_at,updated_at"
+    if include_national_id:
+        profile_fields = profile_fields.replace("address,", "address,national_id,")
     params = {
-        "select": "id,full_name,mobile,province,city,address,national_id,is_active,created_at,updated_at",
+        "select": profile_fields,
         "order": "created_at.desc",
         "limit": str(per_page),
         "offset": str((page - 1) * per_page),
@@ -558,7 +576,7 @@ def get_admin_members(user, query=None):
 
 
 def get_admin_member_listings(user, query=None):
-    require_admin(user)
+    require_roles(user, {"admin", "listing_manager", "member_manager"})
     query = query or {}
     member_id = clean((query.get("member_id") or [""])[0], 80)
     if not re.fullmatch(r"[0-9a-fA-F-]{36}", member_id):
@@ -604,7 +622,7 @@ def get_admin_member_listings(user, query=None):
 
 
 def admin_member_update(user, data):
-    require_admin(user)
+    require_member_manager(user)
     member_id = clean(data.get("member_id"), 80)
     if not re.fullmatch(r"[0-9a-fA-F-]{36}", member_id):
         raise ValueError("شناسه عضو معتبر نیست.")
@@ -626,6 +644,56 @@ def admin_member_update(user, data):
         raise ValueError("عضو پیدا نشد یا اطلاعات او به‌روزرسانی نشد.")
     return {"ok": True, "member": rows[0], "message": "اطلاعات عضو به‌روزرسانی شد."}
 
+
+
+
+def admin_member_role_update(user, data):
+    require_admin(user)
+    member_id = clean(data.get("member_id"), 80)
+    new_role = clean(data.get("role"), 40)
+    if not re.fullmatch(r"[0-9a-fA-F-]{36}", member_id):
+        raise ValueError("شناسه عضو معتبر نیست.")
+    if member_id == str(user.get("id") or ""):
+        raise ValueError("برای جلوگیری از قفل‌شدن دسترسی، نقش حساب خودتان قابل تغییر نیست.")
+    if new_role not in {"user", "listing_manager", "member_manager"}:
+        raise ValueError("نقش انتخاب‌شده معتبر نیست؛ ایجاد یا واگذاری مدیر کل از این بخش امکان‌پذیر نیست.")
+    profiles = sb_request(
+        "GET", "/rest/v1/profiles",
+        params={"id": f"eq.{member_id}", "select": "id", "limit": "1"},
+    ) or []
+    if not profiles:
+        raise ValueError("عضو موردنظر پیدا نشد.")
+    existing = sb_request(
+        "GET", "/rest/v1/user_roles",
+        params={"user_id": f"eq.{member_id}", "select": "role", "limit": "1"},
+    ) or []
+    old_role = (existing[0].get("role") or "user") if existing else "user"
+    if old_role == "admin":
+        raise ValueError("نقش مدیر کل قابل تغییر نیست.")
+    if old_role == new_role:
+        return {"ok": True, "changed": False, "old_role": old_role, "new_role": new_role, "message": "این عضو از قبل همین نقش را دارد."}
+    if existing:
+        rows = sb_request(
+            "PATCH", "/rest/v1/user_roles",
+            params={"user_id": f"eq.{member_id}", "role": f"neq.admin"},
+            payload={"role": new_role},
+            prefer="return=representation",
+        ) or []
+    else:
+        rows = sb_request(
+            "POST", "/rest/v1/user_roles",
+            payload={"user_id": member_id, "role": new_role},
+            prefer="return=representation",
+        ) or []
+    if not rows:
+        raise ValueError("تغییر نقش ذخیره نشد؛ ممکن است نقش عضو هم‌زمان تغییر کرده باشد. فهرست را تازه‌سازی کنید.")
+    return {
+        "ok": True,
+        "changed": True,
+        "old_role": old_role,
+        "new_role": new_role,
+        "message": "نقش عضو با موفقیت به‌روزرسانی شد.",
+    }
 
 def get_admin_storage_usage(user):
     require_admin(user)
@@ -776,7 +844,7 @@ def update_listing_status(listing_id, payload, filters):
 
 
 def admin_listing_action(user, data, dry_run=False):
-    require_admin(user)
+    require_listing_manager(user)
     try:
         listing_id = int(data.get("listing_id", 0))
     except (TypeError, ValueError):
@@ -842,7 +910,7 @@ def owner_listing_action(user, data, dry_run=False):
 
 
 def admin_purchase_action(user, data, dry_run=False):
-    require_admin(user)
+    require_listing_manager(user)
     try:
         request_id = int(data.get("request_id", 0))
     except (TypeError, ValueError):
@@ -1553,11 +1621,19 @@ class handler(BaseHTTPRequestHandler):
                 respond(self, 200, {"ok": True, "profile": profile, "message": "پروفایل شما با موفقیت تکمیل شد."})
                 return
             if fields.get("action") == "admin_member_update":
-                require_admin(user)
+                require_member_manager(user)
                 if PREVIEW_DRY_RUN:
                     respond(self, 200, {"ok": True, "preview": True, "message": "حالت آزمایشی: تغییر حساب ذخیره نشد."})
                     return
                 result = admin_member_update(user, fields)
+                respond(self, 200, result)
+                return
+            if fields.get("action") == "admin_member_role_update":
+                require_admin(user)
+                if PREVIEW_DRY_RUN:
+                    respond(self, 200, {"ok": True, "preview": True, "message": "حالت آزمایشی: تغییر نقش ذخیره نشد."})
+                    return
+                result = admin_member_role_update(user, fields)
                 respond(self, 200, result)
                 return
             if fields.get("action") == "edit_listing":
