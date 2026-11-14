@@ -194,11 +194,21 @@ def update_user_profile(user, data):
     existing = get_user_profile(user)
     if existing and existing.get("is_active") is not True:
         raise AuthError("حساب کاربری شما غیرفعال است. برای پیگیری با پشتیبانی تماس بگیرید.")
+    # Only isolated Staging email-authenticated test accounts may provide an
+    # unverified contact number. Production accounts must use Supabase's
+    # verified Auth phone and cannot overwrite it through this endpoint.
+    if is_staging_email_user(user):
+        mobile = clean(data.get("mobile"), 30)
+        if not valid_phone(mobile):
+            raise ValueError("برای حساب آزمایشی، شماره تماس معتبر وارد کنید.")
+    else:
+        mobile = clean(user.get("phone"), 30) or None
+    profile_payload = {"full_name": full_name, "mobile": mobile, "updated_at": now_iso()}
     if existing:
         rows = sb_request(
             "PATCH", "/rest/v1/profiles",
             params={"id": f"eq.{user['id']}"},
-            payload={"full_name": full_name, "updated_at": now_iso()},
+            payload=profile_payload,
             prefer="return=representation",
         ) or []
     else:
@@ -206,11 +216,9 @@ def update_user_profile(user, data):
             "POST", "/rest/v1/profiles",
             payload={
                 "id": user["id"],
-                "full_name": full_name,
-                "mobile": user.get("phone") or None,
+                **profile_payload,
                 "is_active": True,
                 "created_at": now_iso(),
-                "updated_at": now_iso(),
             },
             prefer="return=representation",
         ) or []
@@ -999,7 +1007,9 @@ def create_listing(fields, uploads, user):
         raise ValueError("محتوای فاکتور معتبر نیست.")
 
     seller_name = clean(profile.get("full_name"), 100)
-    seller_mobile = clean(user.get("phone"), 30)
+    # Staging email-authenticated test accounts use the profile contact number;
+    # real accounts always use the phone verified by Supabase Auth.
+    seller_mobile = clean(profile.get("mobile"), 30) if is_staging_email_user(user) else clean(user.get("phone"), 30)
     submitted_phone = clean(fields.get("sellerPhone"), 30)
     description = clean(fields.get("sellerDescription"), 2000)
     province = clean(fields.get("province"), 100)
