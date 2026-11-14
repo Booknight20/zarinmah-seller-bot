@@ -495,7 +495,7 @@ def get_admin_members(user, query=None):
     search = account_search((query.get("members_search") or [""])[0])
     per_page = 20
     params = {
-        "select": "id,full_name,mobile,is_active,created_at",
+        "select": "id,full_name,mobile,province,city,address,national_id,is_active,created_at,updated_at",
         "order": "created_at.desc",
         "limit": str(per_page),
         "offset": str((page - 1) * per_page),
