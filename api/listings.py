@@ -66,6 +66,16 @@ def valid_phone(value):
     return 8 <= len(phone_digits(value)) <= 15
 
 
+def valid_national_id(value):
+    value = digits(value)
+    if not re.fullmatch(r"\\d{10}", value) or len(set(value)) == 1:
+        return False
+    checksum = int(value[9])
+    total = sum(int(value[i]) * (10 - i) for i in range(9))
+    remainder = total % 11
+    return checksum == (remainder if remainder < 2 else 11 - remainder)
+
+
 def html(value):
     value = str(value or "")
     return value.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")
@@ -168,7 +178,7 @@ def get_user_profile(user):
         "GET", "/rest/v1/profiles",
         params={
             "id": f"eq.{user['id']}",
-            "select": "id,full_name,mobile,is_active",
+            "select": "id,full_name,mobile,address,national_id,is_active",
             "limit": "1",
         },
     ) or []
@@ -184,6 +194,10 @@ def require_complete_profile(user):
     full_name = clean(profile.get("full_name"), 100)
     if not full_name:
         raise ProfileIncompleteError("برای ادامه، ابتدا نام و نام خانوادگی خود را در حساب کاربری تکمیل کنید.")
+    if not clean(profile.get("address"), 500):
+        raise ProfileIncompleteError("برای ادامه، ابتدا آدرس محل سکونت خود را در حساب کاربری تکمیل کنید.")
+    if not valid_national_id(profile.get("national_id")):
+        raise ProfileIncompleteError("برای ادامه، ابتدا کد ملی معتبر خود را در حساب کاربری ثبت کنید.")
     return profile
 
 
@@ -191,6 +205,12 @@ def update_user_profile(user, data):
     full_name = clean(data.get("full_name"), 100)
     if len(full_name.split()) < 2 or len(full_name) < 5:
         raise ValueError("نام و نام خانوادگی کامل را وارد کنید.")
+    address = clean(data.get("address"), 500)
+    national_id = digits(data.get("national_id"))
+    if len(address) < 10:
+        raise ValueError("آدرس کامل محل سکونت را وارد کنید.")
+    if not valid_national_id(national_id):
+        raise ValueError("کد ملی معتبر ۱۰ رقمی وارد کنید.")
     existing = get_user_profile(user)
     if existing and existing.get("is_active") is not True:
         raise AuthError("حساب کاربری شما غیرفعال است. برای پیگیری با پشتیبانی تماس بگیرید.")
@@ -203,7 +223,11 @@ def update_user_profile(user, data):
             raise ValueError("برای حساب آزمایشی، شماره تماس معتبر وارد کنید.")
     else:
         mobile = clean(user.get("phone"), 30) or None
-    profile_payload = {"full_name": full_name, "mobile": mobile, "updated_at": now_iso()}
+    profile_payload = {
+        "full_name": full_name, "mobile": mobile,
+        "address": address, "national_id": national_id,
+        "updated_at": now_iso(),
+    }
     if existing:
         rows = sb_request(
             "PATCH", "/rest/v1/profiles",
@@ -361,7 +385,7 @@ def get_account_data(user, query=None):
             profile_rows = sb_request(
                 "GET", "/rest/v1/profiles",
                 params={
-                    "select": "id,full_name,mobile,is_active",
+                    "select": "id,full_name,mobile,address,national_id,is_active",
                     "id": "in.(" + ",".join(owner_ids) + ")",
                     "limit": str(len(owner_ids)),
                 },
@@ -370,6 +394,8 @@ def get_account_data(user, query=None):
                 str(row.get("id")): {
                     "full_name": row.get("full_name"),
                     "mobile": row.get("mobile"),
+                    "address": row.get("address"),
+                    "national_id": row.get("national_id"),
                     "is_active": row.get("is_active"),
                 }
                 for row in profile_rows
