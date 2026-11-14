@@ -349,6 +349,35 @@ def get_account_data(user, query=None):
     listings, listings_total = sb_request_counted("/rest/v1/listings", listing_params)
     requests_rows, requests_total = sb_request_counted("/rest/v1/purchase_requests", request_params)
 
+    # Only administrators receive the registered seller account details.
+    if admin:
+        owner_ids = sorted({
+            str(item.get("owner_user_id"))
+            for item in listings
+            if item.get("owner_user_id")
+        })
+        seller_profiles = {}
+        if owner_ids:
+            profile_rows = sb_request(
+                "GET", "/rest/v1/profiles",
+                params={
+                    "select": "id,full_name,mobile,is_active",
+                    "id": "in.(" + ",".join(owner_ids) + ")",
+                    "limit": str(len(owner_ids)),
+                },
+            ) or []
+            seller_profiles = {
+                str(row.get("id")): {
+                    "full_name": row.get("full_name"),
+                    "mobile": row.get("mobile"),
+                    "is_active": row.get("is_active"),
+                }
+                for row in profile_rows
+            }
+        for listing in listings:
+            owner_id = str(listing.get("owner_user_id") or "")
+            listing["seller_account"] = seller_profiles.get(owner_id)
+
     titles = {
         str(item.get("id")): item.get("title") or item.get("product_type") or "آگهی"
         for item in listings
