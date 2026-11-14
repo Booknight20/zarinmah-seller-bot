@@ -658,7 +658,7 @@ def update_listing_status(listing_id, payload, filters):
     return rows[0]
 
 
-def admin_listing_action(user, data):
+def admin_listing_action(user, data, dry_run=False):
     require_admin(user)
     try:
         listing_id = int(data.get("listing_id", 0))
@@ -692,11 +692,13 @@ def admin_listing_action(user, data):
         patch, filters = {"deleted_at": None}, {"id": f"eq.{listing_id}", "deleted_at": "not.is.null"}
     else:
         raise ValueError("عملیات مدیریتی آگهی معتبر نیست.")
+    if dry_run:
+        return {"ok": True, "preview": True, "message": "اعتبارسنجی عملیات مدیریتی آگهی انجام شد؛ تغییری ذخیره نشد."}
     row = update_listing_status(listing_id, patch, filters)
     return {"ok": True, "listing": row, "message": "وضعیت آگهی به‌روزرسانی شد."}
 
 
-def owner_listing_action(user, data):
+def owner_listing_action(user, data, dry_run=False):
     require_complete_profile(user)
     try:
         listing_id = int(data.get("listing_id", 0))
@@ -716,11 +718,13 @@ def owner_listing_action(user, data):
         patch, filters = {"deleted_at": now_iso()}, {"id": f"eq.{listing_id}", "owner_user_id": f"eq.{user['id']}", "deleted_at": "is.null"}
     else:
         raise ValueError("عملیات آگهی معتبر نیست.")
+    if dry_run:
+        return {"ok": True, "preview": True, "message": "اعتبارسنجی مالکیت و عملیات آگهی انجام شد؛ تغییری ذخیره نشد."}
     row = update_listing_status(listing_id, patch, filters)
     return {"ok": True, "listing": row, "message": "آگهی شما به‌روزرسانی شد."}
 
 
-def admin_purchase_action(user, data):
+def admin_purchase_action(user, data, dry_run=False):
     require_admin(user)
     try:
         request_id = int(data.get("request_id", 0))
@@ -729,6 +733,8 @@ def admin_purchase_action(user, data):
     action = clean(data.get("request_action"), 30)
     if action != "forward":
         raise ValueError("عملیات درخواست خرید معتبر نیست.")
+    if dry_run:
+        return {"ok": True, "preview": True, "message": "اعتبارسنجی عملیات مدیریتی درخواست خرید انجام شد؛ تغییری ذخیره نشد."}
     rows = sb_request(
         "PATCH", "/rest/v1/purchase_requests",
         params={"id": f"eq.{request_id}", "status": "eq.pending"},
@@ -1279,15 +1285,12 @@ class handler(BaseHTTPRequestHandler):
                 respond(self, 200, result)
                 return
             if fields.get("action") in ("admin_listing_action", "owner_listing_action", "admin_purchase_action"):
-                if PREVIEW_DRY_RUN:
-                    respond(self, 200, {"ok": True, "preview": True, "message": "اعتبارسنجی عملیات پنل در حالت آزمایشی انجام شد؛ تغییری ذخیره نشد."})
-                    return
                 if fields.get("action") == "admin_listing_action":
-                    result = admin_listing_action(user, fields)
+                    result = admin_listing_action(user, fields, dry_run=PREVIEW_DRY_RUN)
                 elif fields.get("action") == "owner_listing_action":
-                    result = owner_listing_action(user, fields)
+                    result = owner_listing_action(user, fields, dry_run=PREVIEW_DRY_RUN)
                 else:
-                    result = admin_purchase_action(user, fields)
+                    result = admin_purchase_action(user, fields, dry_run=PREVIEW_DRY_RUN)
                 respond(self, 200, result)
                 return
             if PREVIEW_DRY_RUN:
