@@ -426,7 +426,7 @@ def get_account_data(user, query=None):
             profile_rows = sb_request(
                 "GET", "/rest/v1/profiles",
                 params={
-                    "select": "id,full_name,mobile,address,national_id,is_active",
+                    "select": "id,full_name,mobile,province,city,address,national_id,is_active",
                     "id": "in.(" + ",".join(owner_ids) + ")",
                     "limit": str(len(owner_ids)),
                 },
