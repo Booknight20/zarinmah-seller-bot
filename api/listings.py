@@ -624,9 +624,17 @@ def create_admin_invoice_link(user, listing_id):
     if not listing:
         raise ValueError("آگهی پیدا نشد.")
     path = clean(listing.get("invoice_path"), 500)
-    if not path or path.startswith("/") or ".." in path.split("/"):
+    parts = path.split("/")
+    if (
+        len(parts) != 2
+        or parts[0] != "website"
+        or not parts[1]
+        or parts[1] in {".", ".."}
+        or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,180}", parts[1])
+        or not re.search(r"\.(?:jpg|jpeg|png|pdf)$", parts[1], re.IGNORECASE)
+    ):
         raise ValueError("فاکتور خصوصی برای این آگهی ثبت نشده است.")
-    encoded_path = "/".join(quote(part, safe="") for part in path.split("/"))
+    encoded_path = "/".join(quote(part, safe="") for part in parts)
     result = sb_request(
         "POST", f"/storage/v1/object/sign/listing-invoices/{encoded_path}",
         payload={"expiresIn": 90},
