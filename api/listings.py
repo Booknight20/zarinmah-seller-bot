@@ -1029,9 +1029,10 @@ def notify_admin(listing, invoice_sent, is_update=False):
         "fixed": "قیمت ثابت", "percent": "درصد بالاتر از تابلو",
         "amount": "مبلغ بالاتر از تابلو", "negotiable": "توافقی",
     }
+    heading = "✏️ <b>ویرایش آگهی از سایت زرین ماه</b>\n\n" if is_update else "🆕 <b>آگهی جدید از سایت زرین ماه</b>\n\n"
     message = (
-        + ("✏️ <b>ویرایش آگهی از سایت زرین ماه</b>\n\n" if is_update else "🆕 <b>آگهی جدید از سایت زرین ماه</b>\n\n")
-        f"🆔 آگهی: <code>{listing['id']}</code>\n"
+        heading
+        + f"🆔 آگهی: <code>{listing['id']}</code>\n"
         f"👤 فروشنده: {html(listing['seller_name'])}\n"
         f"📞 تماس: <code>{html(listing['seller_mobile'])}</code>\n"
         f"💎 کالا: {html(listing['product_type'])}\n"
