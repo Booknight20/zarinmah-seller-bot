@@ -370,7 +370,7 @@ def get_account_data(user, query=None):
     requests_search = account_search((query.get("requests_search") or [""])[0])
 
     listing_params = {
-        "select": "id,title,product_type,weight,weight_unit,purity,province,city,description,pricing_method,pricing_value,price,image_url" + (",image_url_2" if SECOND_IMAGE_ENABLED else "") + ",status,created_at,updated_at,deleted_at,seller_name,seller_mobile,owner_user_id",
+        "select": "id,title,product_type,weight,weight_unit,purity,province,city,description,pricing_method,pricing_value,price,image_url" + (",image_url_2" if SECOND_IMAGE_ENABLED else "") + ",status,created_at,updated_at,deleted_at,seller_name,seller_mobile,owner_user_id,invoice_path",
         "order": "created_at.desc",
         "limit": str(per_page),
         "offset": str((listings_page - 1) * per_page),
@@ -413,6 +413,9 @@ def get_account_data(user, query=None):
 
     listings, listings_total = sb_request_counted("/rest/v1/listings", listing_params)
     requests_rows, requests_total = sb_request_counted("/rest/v1/purchase_requests", request_params)
+    for listing in listings:
+        listing["invoice_available"] = bool(listing.get("invoice_path"))
+        listing.pop("invoice_path", None)
 
     # Only administrators receive the registered seller account details.
     if admin:
@@ -1021,13 +1024,13 @@ def pricing_details(fields):
     return method, value, price, label
 
 
-def notify_admin(listing, invoice_sent):
+def notify_admin(listing, invoice_sent, is_update=False):
     method_labels = {
         "fixed": "قیمت ثابت", "percent": "درصد بالاتر از تابلو",
         "amount": "مبلغ بالاتر از تابلو", "negotiable": "توافقی",
     }
     message = (
-        "🆕 <b>آگهی جدید از سایت زرین ماه</b>\n\n"
+        + ("✏️ <b>ویرایش آگهی از سایت زرین ماه</b>\n\n" if is_update else "🆕 <b>آگهی جدید از سایت زرین ماه</b>\n\n")
         f"🆔 آگهی: <code>{listing['id']}</code>\n"
         f"👤 فروشنده: {html(listing['seller_name'])}\n"
         f"📞 تماس: <code>{html(listing['seller_mobile'])}</code>\n"
@@ -1038,7 +1041,7 @@ def notify_admin(listing, invoice_sent):
         f"💰 روش قیمت‌گذاری: {method_labels.get(listing['pricing_method'], listing['pricing_method'])}\n"
         f"💵 قیمت: {html(listing['_price_label'])}\n\n"
         f"📝 توضیحات: {html(listing['description'])}\n\n"
-        f"🧾 فاکتور خصوصی ذخیره شد؛ ارسال نسخه به مدیر: {'موفق' if invoice_sent else 'ناموفق'}\n"
+        f"🧾 فاکتور خصوصی: {'فاکتور جدید ذخیره و به مدیر ارسال شد' if invoice_sent else ('فاکتور قبلی حفظ شد' if is_update else 'ارسال نسخه به مدیر ناموفق بود')}\n"
         "⚠️ تا تأیید مدیر، آگهی عمومی نمی‌شود."
     )
     keyboard = {"inline_keyboard": [[
@@ -1210,6 +1213,161 @@ def create_listing(fields, uploads, user):
             delete_storage("listing-images", second_photo_path)
         if photo_uploaded:
             delete_storage("listing-images", photo_path)
+        raise
+
+
+def edit_listing(fields, uploads, user, dry_run=False):
+    profile = require_complete_profile(user)
+    try:
+        listing_id = int(fields.get("listing_id", 0))
+    except (TypeError, ValueError):
+        raise ValueError("شناسه آگهی معتبر نیست.")
+    listing = get_listing(listing_id)
+    if (
+        not listing
+        or str(listing.get("owner_user_id") or "") != str(user.get("id") or "")
+        or listing.get("deleted_at") is not None
+    ):
+        raise ValueError("آگهی پیدا نشد یا متعلق به حساب شما نیست.")
+    if listing.get("status") not in ("pending", "published"):
+        raise ValueError("فقط آگهی‌های در انتظار بررسی یا منتشرشده قابل ویرایش هستند.")
+
+    description = clean(fields.get("sellerDescription"), 2000)
+    province = clean(fields.get("province"), 100)
+    city = clean(fields.get("city"), 100)
+    if not description or province not in PROVINCE_CITIES or city not in PROVINCE_CITIES.get(province, set()):
+        raise ValueError("توضیحات، استان و شهر معتبر آگهی را وارد کنید.")
+
+    product_type, weight, weight_unit, purity = product_details(fields)
+    pricing_method, pricing_value, price, price_label = pricing_details(fields)
+    photo = uploads.get("sellerPhoto")
+    second_photo = uploads.get("sellerPhoto2")
+    invoice = uploads.get("sellerInvoice")
+    if photo:
+        photo = check_file(photo, {"image/jpeg", "image/png", "image/webp"}, "عکس محصول", max_size=MAX_PHOTO_SIZE)
+        if not sniff_photo(photo["data"]):
+            raise ValueError("محتوای عکس محصول معتبر نیست.")
+    if second_photo:
+        second_photo = check_file(second_photo, {"image/jpeg", "image/png", "image/webp"}, "عکس دوم محصول", max_size=MAX_PHOTO_SIZE)
+        if not sniff_photo(second_photo["data"]):
+            raise ValueError("محتوای عکس دوم محصول معتبر نیست.")
+        if not SECOND_IMAGE_ENABLED:
+            raise ValueError("ویرایش عکس دوم هنوز فعال نشده است.")
+    if invoice:
+        invoice = check_file(invoice, {"image/jpeg", "image/png", "image/webp", "application/pdf"}, "فاکتور فروش")
+        if not sniff_invoice(invoice["data"]):
+            raise ValueError("محتوای فاکتور فروش معتبر نیست.")
+    if not invoice and not listing.get("invoice_path"):
+        raise ValueError("برای این آگهی فاکتور خصوصی ثبت نشده است؛ لطفاً فاکتور را بارگذاری کنید.")
+
+    seller_name = clean(profile.get("full_name"), 100)
+    seller_mobile = clean(profile.get("mobile"), 30) if is_staging_email_user(user) else clean(user.get("phone"), 30)
+    if not seller_name or not valid_phone(seller_mobile):
+        raise ValueError("اطلاعات تماس حساب کاربری معتبر نیست.")
+    if fields.get("invoiceConfirm") not in ("on", "true", "1", "yes", "بله"):
+        raise ValueError("تأیید داشتن فاکتور معتبر الزامی است.")
+
+    if dry_run:
+        return {
+            "ok": True, "preview": True,
+            "message": "اعتبارسنجی ویرایش آگهی انجام شد؛ در حالت آزمایشی هیچ اطلاعات یا فایلی ذخیره نشد.",
+        }
+
+    token = uuid.uuid4().hex
+    new_photo_path = None
+    new_second_photo_path = None
+    new_invoice_path = None
+    uploaded = []
+    try:
+        patch = {
+            "title": product_type,
+            "product_type": product_type,
+            "weight": weight,
+            "weight_unit": weight_unit,
+            "purity": purity,
+            "pricing_method": pricing_method,
+            "pricing_value": pricing_value,
+            "price": price,
+            "description": description,
+            "province": province,
+            "city": city,
+            "seller_name": seller_name,
+            "seller_mobile": seller_mobile,
+            "status": "pending",
+            "published_at": None,
+            "updated_at": now_iso(),
+        }
+        if photo:
+            ext = {"image/jpeg": "jpg", "image/png": "png", "image/webp": "webp"}[photo["content_type"]]
+            new_photo_path = f"website/{token}.{ext}"
+            patch["image_url"] = upload_storage("listing-images", new_photo_path, photo["data"], photo["content_type"])
+            uploaded.append(("listing-images", new_photo_path))
+        if second_photo:
+            ext = {"image/jpeg": "jpg", "image/png": "png", "image/webp": "webp"}[second_photo["content_type"]]
+            new_second_photo_path = f"website/{token}-2.{ext}"
+            patch["image_url_2"] = upload_storage("listing-images", new_second_photo_path, second_photo["data"], second_photo["content_type"])
+            uploaded.append(("listing-images", new_second_photo_path))
+        if invoice:
+            ext = {"application/pdf": "pdf", "image/jpeg": "jpg", "image/png": "png", "image/webp": "webp"}[invoice["content_type"]]
+            new_invoice_path = f"website/{token}.{ext}"
+            patch["invoice_path"] = upload_storage("listing-invoices", new_invoice_path, invoice["data"], invoice["content_type"])
+            uploaded.append(("listing-invoices", new_invoice_path))
+
+        rows = sb_request(
+            "PATCH", "/rest/v1/listings",
+            params={
+                "id": f"eq.{listing_id}",
+                "owner_user_id": f"eq.{user['id']}",
+                "status": f"eq.{listing['status']}",
+                "deleted_at": "is.null",
+            },
+            payload=patch,
+            prefer="return=representation",
+        ) or []
+        if not rows:
+            raise ValueError("آگهی در این فاصله تغییر کرده یا دیگر اجازه ویرایش آن را ندارید.")
+
+        updated = rows[0]
+        listing_for_admin = {
+            "id": listing_id,
+            "seller_name": seller_name,
+            "seller_mobile": seller_mobile,
+            "product_type": product_type,
+            "weight": weight,
+            "weight_unit": weight_unit,
+            "purity": purity,
+            "province": province,
+            "city": city,
+            "pricing_method": pricing_method,
+            "description": description,
+            "_weight_label": clean(fields.get("parsianWeight") if weight_unit == "soot" else fields.get("sellerWeight")) or "ثبت نشده",
+            "_weight_unit_label": "سوت" if weight_unit == "soot" else "گرم",
+            "_price_label": price_label,
+            "image_url": updated.get("image_url") or listing.get("image_url"),
+        }
+        invoice_sent = False
+        if invoice:
+            try:
+                send_invoice_to_admin(invoice, listing_id)
+                invoice_sent = True
+            except Exception as exc:
+                print("UPDATED INVOICE TELEGRAM DELIVERY FAILED:", str(exc)[:250])
+        notified = False
+        try:
+            notify_admin(listing_for_admin, invoice_sent, is_update=True)
+            notified = True
+        except Exception as exc:
+            print("UPDATED LISTING ADMIN NOTIFICATION FAILED:", str(exc)[:250])
+        return {
+            "id": listing_id,
+            "status": "pending",
+            "admin_notification_sent": notified,
+            "invoice_sent": invoice_sent,
+            "message": "تغییرات آگهی ذخیره شد و برای بررسی مجدد مدیر ارسال شد؛ تا تأیید مدیر در ویترین نمایش داده نمی‌شود.",
+        }
+    except Exception:
+        for bucket, path in uploaded:
+            delete_storage(bucket, path)
         raise
 
 
@@ -1398,6 +1556,10 @@ class handler(BaseHTTPRequestHandler):
                     respond(self, 200, {"ok": True, "preview": True, "message": "حالت آزمایشی: تغییر حساب ذخیره نشد."})
                     return
                 result = admin_member_update(user, fields)
+                respond(self, 200, result)
+                return
+            if fields.get("action") == "edit_listing":
+                result = edit_listing(fields, uploads, user, dry_run=PREVIEW_DRY_RUN)
                 respond(self, 200, result)
                 return
             if fields.get("action") in ("admin_listing_action", "owner_listing_action", "admin_purchase_action"):
