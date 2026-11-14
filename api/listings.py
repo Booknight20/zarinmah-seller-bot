@@ -118,6 +118,17 @@ class ProfileIncompleteError(Exception):
     pass
 
 
+STAGING_SUPABASE_URL = "https://qijahxokldkaqmjinfvy.supabase.co"
+
+
+def is_staging_email_user(user):
+    return (
+        SUPABASE_URL == STAGING_SUPABASE_URL
+        and bool(clean(user.get("email"), 254))
+        and not clean(user.get("phone"), 30)
+    )
+
+
 def authenticate_user(handler):
     authorization = clean(handler.headers.get("Authorization", ""), 2048)
     if not authorization.startswith("Bearer "):
@@ -143,9 +154,13 @@ def authenticate_user(handler):
         raise AuthError("پاسخ احراز هویت معتبر نیست.")
     user_id = clean(user.get("id"), 80)
     phone = clean(user.get("phone"), 30)
-    if not user_id or not valid_phone(phone):
-        raise AuthError("حساب کاربری باید شماره موبایل تأییدشده داشته باشد.")
-    return {"id": user_id, "phone": phone}
+    if not user_id:
+        raise AuthError("شناسه حساب کاربری معتبر نیست.")
+    if valid_phone(phone):
+        return {"id": user_id, "phone": phone, "email": clean(user.get("email"), 254)}
+    if is_staging_email_user(user):
+        return {"id": user_id, "phone": "", "email": clean(user.get("email"), 254)}
+    raise AuthError("حساب کاربری باید شماره موبایل تأییدشده داشته باشد.")
 
 
 def get_user_profile(user):
@@ -192,7 +207,7 @@ def update_user_profile(user, data):
             payload={
                 "id": user["id"],
                 "full_name": full_name,
-                "mobile": user["phone"],
+                "mobile": user.get("phone") or None,
                 "is_active": True,
                 "created_at": now_iso(),
                 "updated_at": now_iso(),
@@ -1243,7 +1258,10 @@ class handler(BaseHTTPRequestHandler):
             user = authenticate_user(self)
             fields, uploads = parse_body(self)
             if fields.get("action") == "complete_profile":
-                if PREVIEW_DRY_RUN:
+                # Allow only the minimal account-profile write for email-authenticated
+                # test users in the isolated Staging project. All other preview writes
+                # remain protected by PREVIEW_DRY_RUN.
+                if PREVIEW_DRY_RUN and not is_staging_email_user(user):
                     respond(self, 200, {
                         "ok": True, "preview": True,
                         "message": "اعتبارسنجی فرم تکمیل پروفایل در حالت آزمایشی انجام شد؛ اطلاعات ذخیره نشد.",
