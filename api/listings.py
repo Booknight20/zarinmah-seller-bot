@@ -502,6 +502,33 @@ def get_account_data(user, query=None):
     }
 
 
+def record_site_visit(data):
+    visitor_id = clean(data.get("visitor_id"), 64)
+    session_id = clean(data.get("session_id"), 64)
+    try:
+        visitor_id = str(uuid.UUID(visitor_id))
+        session_id = str(uuid.UUID(session_id))
+    except (ValueError, TypeError, AttributeError):
+        raise ValueError("شناسه ناشناس بازدید معتبر نیست.")
+    path = clean(data.get("path") or "/", 200).split("?", 1)[0].split("#", 1)[0]
+    if not re.fullmatch(r"/[A-Za-z0-9/_-]{0,180}", path) or path.startswith("//"):
+        path = "/"
+    sb_request(
+        "POST", "/rest/v1/site_visit_events",
+        payload={"visitor_id": visitor_id, "session_id": session_id, "path": path},
+        prefer="resolution=ignore-duplicates,return=minimal",
+    )
+    return {"ok": True}
+
+
+def get_admin_dashboard_stats(user):
+    require_admin(user)
+    result = sb_request("POST", "/rest/v1/rpc/zarinmah_admin_dashboard_stats", payload={})
+    if not isinstance(result, dict):
+        raise RuntimeError("گزارش مدیریتی از پایگاه داده دریافت نشد.")
+    return {"ok": True, "stats": result}
+
+
 def get_admin_members(user, query=None):
     require_member_manager(user)
     query = query or {}
@@ -1561,6 +1588,10 @@ class handler(BaseHTTPRequestHandler):
                 user = authenticate_user(self)
                 respond(self, 200, get_account_data(user, query))
                 return
+            if action == "admin_dashboard_stats":
+                user = authenticate_user(self)
+                respond(self, 200, get_admin_dashboard_stats(user))
+                return
             if action == "admin_members":
                 user = authenticate_user(self)
                 respond(self, 200, get_admin_members(user, query))
@@ -1605,8 +1636,11 @@ class handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         try:
-            user = authenticate_user(self)
             fields, uploads = parse_body(self)
+            if fields.get("action") == "track_site_visit":
+                respond(self, 202, record_site_visit(fields))
+                return
+            user = authenticate_user(self)
             if fields.get("action") == "complete_profile":
                 # Allow only the minimal account-profile write for email-authenticated
                 # test users in the isolated Staging project. All other preview writes
