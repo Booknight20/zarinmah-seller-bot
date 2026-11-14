@@ -1024,7 +1024,7 @@ def pricing_details(fields):
     return method, value, price, label
 
 
-def notify_admin(listing, invoice_sent, is_update=False):
+def notify_admin(listing, invoice_sent, is_update=False, invoice_replaced=False):
     method_labels = {
         "fixed": "قیمت ثابت", "percent": "درصد بالاتر از تابلو",
         "amount": "مبلغ بالاتر از تابلو", "negotiable": "توافقی",
@@ -1042,7 +1042,7 @@ def notify_admin(listing, invoice_sent, is_update=False):
         f"💰 روش قیمت‌گذاری: {method_labels.get(listing['pricing_method'], listing['pricing_method'])}\n"
         f"💵 قیمت: {html(listing['_price_label'])}\n\n"
         f"📝 توضیحات: {html(listing['description'])}\n\n"
-        f"🧾 فاکتور خصوصی: {'فاکتور جدید ذخیره و به مدیر ارسال شد' if invoice_sent else ('فاکتور قبلی حفظ شد' if is_update else 'ارسال نسخه به مدیر ناموفق بود')}\n"
+        f"🧾 فاکتور خصوصی: {'فاکتور جدید ذخیره و به مدیر ارسال شد' if invoice_sent else ('فاکتور جدید ذخیره شد، اما ارسال آن به مدیر ناموفق بود' if invoice_replaced else ('فاکتور قبلی حفظ شد' if is_update else 'ارسال نسخه به مدیر ناموفق بود'))}\n"
         "⚠️ تا تأیید مدیر، آگهی عمومی نمی‌شود."
     )
     keyboard = {"inline_keyboard": [[
@@ -1355,7 +1355,7 @@ def edit_listing(fields, uploads, user, dry_run=False):
                 print("UPDATED INVOICE TELEGRAM DELIVERY FAILED:", str(exc)[:250])
         notified = False
         try:
-            notify_admin(listing_for_admin, invoice_sent, is_update=True)
+            notify_admin(listing_for_admin, invoice_sent, is_update=True, invoice_replaced=bool(invoice))
             notified = True
         except Exception as exc:
             print("UPDATED LISTING ADMIN NOTIFICATION FAILED:", str(exc)[:250])
@@ -1364,6 +1364,7 @@ def edit_listing(fields, uploads, user, dry_run=False):
             "status": "pending",
             "admin_notification_sent": notified,
             "invoice_sent": invoice_sent,
+            "invoice_replaced": bool(invoice),
             "message": "تغییرات آگهی ذخیره شد و برای بررسی مجدد مدیر ارسال شد؛ تا تأیید مدیر در ویترین نمایش داده نمی‌شود.",
         }
     except Exception:
