@@ -68,7 +68,7 @@ def valid_phone(value):
 
 def valid_national_id(value):
     value = digits(value)
-    if not re.fullmatch(r"\\d{10}", value) or len(set(value)) == 1:
+    if not re.fullmatch(r"\d{10}", value) or len(set(value)) == 1:
         return False
     checksum = int(value[9])
     total = sum(int(value[i]) * (10 - i) for i in range(9))
