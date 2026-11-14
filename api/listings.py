@@ -33,6 +33,40 @@ PROVINCES = {
     "کرمانشاه", "کهگیلویه و بویراحمد", "گلستان", "گیلان", "لرستان",
     "مازندران", "مرکزی", "هرمزگان", "همدان", "یزد",
 }
+PROVINCE_CITIES = {
+    "آذربایجان شرقی": {"تبریز", "مراغه", "مرند", "میانه", "اهر"},
+    "آذربایجان غربی": {"ارومیه", "خوی", "مهاباد", "بوکان", "میاندوآب"},
+    "اردبیل": {"اردبیل", "پارس‌آباد", "مشگین‌شهر", "خلخال"},
+    "اصفهان": {"اصفهان", "کاشان", "خمینی‌شهر", "نجف‌آباد", "شاهین‌شهر"},
+    "البرز": {"کرج", "فردیس", "نظرآباد", "محمدشهر"},
+    "ایلام": {"ایلام", "دهلران", "آبدانان", "ایوان"},
+    "بوشهر": {"بوشهر", "برازجان", "گناوه", "کنگان"},
+    "تهران": {"تهران", "اسلام‌شهر", "شهریار", "قدس", "ورامین"},
+    "چهارمحال و بختیاری": {"شهرکرد", "بروجن", "فارسان", "لردگان"},
+    "خراسان جنوبی": {"بیرجند", "قائن", "طبس", "فردوس"},
+    "خراسان رضوی": {"مشهد", "نیشابور", "سبزوار", "تربت حیدریه", "کاشمر"},
+    "خراسان شمالی": {"بجنورد", "شیروان", "اسفراین", "جاجرم"},
+    "خوزستان": {"اهواز", "دزفول", "آبادان", "ماهشهر", "خرمشهر"},
+    "زنجان": {"زنجان", "ابهر", "خرمدره", "قیدار"},
+    "سمنان": {"سمنان", "شاهرود", "دامغان", "گرمسار"},
+    "سیستان و بلوچستان": {"زاهدان", "چابهار", "ایرانشهر", "زابل", "خاش"},
+    "فارس": {"شیراز", "مرودشت", "جهرم", "فسا", "کازرون"},
+    "قزوین": {"قزوین", "تاکستان", "الوند", "آبیک"},
+    "قم": {"قم", "جعفریه", "کهک"},
+    "کردستان": {"سنندج", "سقز", "مریوان", "بانه", "قروه"},
+    "کرمان": {"کرمان", "سیرجان", "رفسنجان", "جیرفت", "بم"},
+    "کرمانشاه": {"کرمانشاه", "اسلام‌آباد غرب", "کنگاور", "هرسین", "پاوه"},
+    "کهگیلویه و بویراحمد": {"یاسوج", "دوگنبدان", "دهدشت", "لیکک"},
+    "گلستان": {"گرگان", "گنبدکاووس", "علی‌آباد کتول", "آق‌قلا"},
+    "گیلان": {"رشت", "بندر انزلی", "لاهیجان", "لنگرود", "آستارا"},
+    "لرستان": {"خرم‌آباد", "بروجرد", "دورود", "الیگودرز", "کوهدشت"},
+    "مازندران": {"ساری", "بابل", "آمل", "قائم‌شهر", "نوشهر"},
+    "مرکزی": {"اراک", "ساوه", "خمین", "محلات", "دلیجان"},
+    "هرمزگان": {"بندرعباس", "میناب", "قشم", "بندر لنگه", "جاسک"},
+    "همدان": {"همدان", "ملایر", "نهاوند", "تویسرکان", "اسدآباد"},
+    "یزد": {"یزد", "میبد", "اردکان", "بافق", "مهریز"},
+}
+
 JEWELRY = {
     "انگشتر": "انگشتر طلا", "گوشواره": "گوشواره طلا", "النگو": "النگو طلا",
     "زنجیر": "زنجیر طلا", "گردنبند": "گردنبند طلا", "دستبند": "دستبند طلا",
@@ -178,7 +212,7 @@ def get_user_profile(user):
         "GET", "/rest/v1/profiles",
         params={
             "id": f"eq.{user['id']}",
-            "select": "id,full_name,mobile,address,national_id,is_active",
+            "select": "id,full_name,mobile,province,city,address,national_id,is_active",
             "limit": "1",
         },
     ) or []
@@ -194,6 +228,8 @@ def require_complete_profile(user):
     full_name = clean(profile.get("full_name"), 100)
     if not full_name:
         raise ProfileIncompleteError("برای ادامه، ابتدا نام و نام خانوادگی خود را در حساب کاربری تکمیل کنید.")
+    if profile.get("province") not in PROVINCE_CITIES or profile.get("city") not in PROVINCE_CITIES.get(profile.get("province"), set()):
+        raise ProfileIncompleteError("برای ادامه، استان و شهر محل سکونت را در حساب کاربری انتخاب کنید.")
     if not clean(profile.get("address"), 500):
         raise ProfileIncompleteError("برای ادامه، ابتدا آدرس محل سکونت خود را در حساب کاربری تکمیل کنید.")
     if not valid_national_id(profile.get("national_id")):
@@ -205,8 +241,12 @@ def update_user_profile(user, data):
     full_name = clean(data.get("full_name"), 100)
     if len(full_name.split()) < 2 or len(full_name) < 5:
         raise ValueError("نام و نام خانوادگی کامل را وارد کنید.")
+    province = clean(data.get("province"), 80)
+    city = clean(data.get("city"), 100)
     address = clean(data.get("address"), 500)
     national_id = digits(data.get("national_id"))
+    if province not in PROVINCE_CITIES or city not in PROVINCE_CITIES.get(province, set()):
+        raise ValueError("استان و شهر محل سکونت را از فهرست انتخاب کنید.")
     if len(address) < 10:
         raise ValueError("آدرس کامل محل سکونت را وارد کنید.")
     if not valid_national_id(national_id):
@@ -225,6 +265,7 @@ def update_user_profile(user, data):
         mobile = clean(user.get("phone"), 30) or None
     profile_payload = {
         "full_name": full_name, "mobile": mobile,
+        "province": province, "city": city,
         "address": address, "national_id": national_id,
         "updated_at": now_iso(),
     }
@@ -394,6 +435,8 @@ def get_account_data(user, query=None):
                 str(row.get("id")): {
                     "full_name": row.get("full_name"),
                     "mobile": row.get("mobile"),
+                    "province": row.get("province"),
+                    "city": row.get("city"),
                     "address": row.get("address"),
                     "national_id": row.get("national_id"),
                     "is_active": row.get("is_active"),
