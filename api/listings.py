@@ -381,7 +381,7 @@ def get_account_data(user, query=None):
     admin = role == "admin"
     listing_staff = role in {"admin", "listing_manager"}
     listings_per_page = 16 if listing_staff else 20
-    requests_per_page = 20
+    requests_per_page = 16
     listings_page = account_page((query.get("listings_page") or ["1"])[0])
     requests_page = account_page((query.get("requests_page") or ["1"])[0])
     listings_status = clean((query.get("listings_status") or ["all"])[0], 20)
