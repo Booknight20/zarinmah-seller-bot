@@ -8,11 +8,6 @@ alter table public.purchase_requests
 create index if not exists purchase_requests_listing_status_created_idx
   on public.purchase_requests (listing_id, status, created_at desc);
 
-create unique index if not exists purchase_requests_buyer_listing_active_uidx
-  on public.purchase_requests (buyer_user_id, listing_id)
-  where buyer_user_id is not null
-    and status in ('pending', 'approved', 'forwarded', 'paid');
-
 create table if not exists public.purchase_access_payments (
   id bigint generated always as identity primary key,
   request_id bigint not null unique
