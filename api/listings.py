@@ -374,7 +374,8 @@ def get_account_data(user, query=None):
     role = get_user_role(user)
     admin = role == "admin"
     listing_staff = role in {"admin", "listing_manager"}
-    per_page = 20
+    listings_per_page = 16 if listing_staff else 20
+    requests_per_page = 20
     listings_page = account_page((query.get("listings_page") or ["1"])[0])
     requests_page = account_page((query.get("requests_page") or ["1"])[0])
     listings_status = clean((query.get("listings_status") or ["all"])[0], 20)
@@ -385,14 +386,14 @@ def get_account_data(user, query=None):
     listing_params = {
         "select": "id,title,product_type,weight,weight_unit,purity,province,city,description,pricing_method,pricing_value,price,image_url" + (",image_url_2" if SECOND_IMAGE_ENABLED else "") + ",status,created_at,updated_at,deleted_at,seller_name,seller_mobile,owner_user_id,invoice_path",
         "order": "created_at.desc",
-        "limit": str(per_page),
-        "offset": str((listings_page - 1) * per_page),
+        "limit": str(listings_per_page),
+        "offset": str((listings_page - 1) * listings_per_page),
     }
     request_params = {
         "select": "id,listing_id,buyer_name,buyer_mobile,message,status,created_at,updated_at,buyer_user_id",
         "order": "created_at.desc",
-        "limit": str(per_page),
-        "offset": str((requests_page - 1) * per_page),
+        "limit": str(requests_per_page),
+        "offset": str((requests_page - 1) * requests_per_page),
     }
     if not listing_staff:
         listing_params["owner_user_id"] = f"eq.{user['id']}"
@@ -561,17 +562,17 @@ def get_admin_members(user, query=None):
         for row in listing_rows:
             owner = str(row.get('owner_user_id') or '')
             if owner not in all_ids: continue
-            item = listing_counts.setdefault(owner, {'total':0,'active':0,'pending':0,'published':0,'sold':0,'deleted':0})
+            item = listing_counts.setdefault(owner, {'total':0,'active':0,'pending':0,'published':0,'sold':0,'rejected':0,'deleted':0})
             item['total'] += 1
             if row.get('deleted_at') is not None: item['deleted'] += 1
             else:
                 item['active'] += 1
-                if row.get('status') in ('pending','published','sold'): item[row['status']] += 1
+                if row.get('status') in ('pending','published','sold','rejected'): item[row['status']] += 1
     filtered = []
     for member in members:
         mid = str(member.get('id'))
         member['role'] = role_map.get(mid, 'user')
-        member['listing_counts'] = listing_counts.get(mid, {'total':0,'active':0,'pending':0,'published':0,'sold':0,'deleted':0})
+        member['listing_counts'] = listing_counts.get(mid, {'total':0,'active':0,'pending':0,'published':0,'sold':0,'rejected':0,'deleted':0})
         if role_filter != 'all' and member['role'] != role_filter: continue
         has_listings = member['listing_counts']['total'] > 0
         if listing_filter == 'with' and not has_listings: continue
@@ -580,7 +581,7 @@ def get_admin_members(user, query=None):
     if sort_by == 'most_listings': filtered.sort(key=lambda m: (m['listing_counts']['total'], m.get('created_at') or ''), reverse=True)
     elif sort_by == 'oldest': filtered.sort(key=lambda m: m.get('created_at') or '')
     else: filtered.sort(key=lambda m: m.get('created_at') or '', reverse=True)
-    total, per_page = len(filtered), 20
+    total, per_page = len(filtered), 16
     page_members = filtered[(page-1)*per_page:page*per_page]
     return {'ok':True,'members':page_members,'pagination':{'page':page,'per_page':per_page,'total':total,'total_pages':max(1,(total+per_page-1)//per_page),'search':search,'status':status_filter,'role':role_filter,'listings':listing_filter,'sort':sort_by}}
 
