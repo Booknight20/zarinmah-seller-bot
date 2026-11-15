@@ -1687,6 +1687,13 @@ def payment_callback(handler, query):
             "GET", "/rest/v1/purchase_requests",
             params={"id": f"eq.{payment['request_id']}", "buyer_user_id": f"eq.{payment['buyer_user_id']}", "select": "id,status", "limit": "1"},
         ) or []
+        if request_rows and request_rows[0].get("status") == "approved":
+            request_rows = sb_request(
+                "PATCH", "/rest/v1/purchase_requests",
+                params={"id": f"eq.{payment['request_id']}", "buyer_user_id": f"eq.{payment['buyer_user_id']}", "status": "eq.approved"},
+                payload={"status": "paid", "paid_at": now_iso(), "updated_at": now_iso()},
+                prefer="return=representation",
+            ) or []
         if request_rows and request_rows[0].get("status") == "paid":
             respond_redirect(handler, return_url + "?purchase_payment=success")
         else:
