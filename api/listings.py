@@ -998,7 +998,7 @@ def seller_purchase_action(user, data, dry_run=False):
         "status": "approved" if action == "approve" else "rejected",
         "updated_at": now.isoformat(),
         "seller_approved_at": now.isoformat() if action == "approve" else None,
-        "expires_at": (now + timedelta(hours=24)).isoformat() if action == "approve" else None,
+        "expires_at": (now + timedelta(hours=6)).isoformat() if action == "approve" else None,
     }
     rows = sb_request(
         "PATCH", "/rest/v1/purchase_requests",
