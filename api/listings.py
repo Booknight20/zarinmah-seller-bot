@@ -418,14 +418,23 @@ def get_account_data(user, query=None):
 
     if listings_status == "deleted":
         listing_params["deleted_at"] = "not.is.null"
+    elif listings_status == "active":
+        listing_params["deleted_at"] = "is.null"
+        listing_params["status"] = "in.(pending,published)"
+    elif listings_status == "archive":
+        listing_params["or"] = "(status.in.(sold,rejected),deleted_at.not.is.null)"
     else:
         listing_params["deleted_at"] = "is.null"
-        if listings_status in ("pending", "published", "sold"):
+        if listings_status in ("pending", "published", "sold", "rejected"):
             listing_params["status"] = f"eq.{listings_status}"
         elif listings_status != "all":
             listings_status = "all"
 
-    if requests_status in ("pending", "approved", "forwarded", "rejected", "expired", "paid"):
+    if requests_status == "active":
+        request_params["status"] = "in.(pending,approved)"
+    elif requests_status == "archive":
+        request_params["status"] = "in.(forwarded,rejected,expired,paid)"
+    elif requests_status in ("pending", "approved", "forwarded", "rejected", "expired", "paid"):
         request_params["status"] = f"eq.{requests_status}"
     elif requests_status != "all":
         requests_status = "all"
