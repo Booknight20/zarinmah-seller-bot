@@ -2,7 +2,7 @@ import json
 import os
 import re
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from email import policy
 from email.parser import BytesParser
 from http.server import BaseHTTPRequestHandler
@@ -390,15 +390,25 @@ def get_account_data(user, query=None):
         "offset": str((listings_page - 1) * listings_per_page),
     }
     request_params = {
-        "select": "id,listing_id,buyer_name,buyer_mobile,message,status,created_at,updated_at,buyer_user_id",
+        "select": "id,listing_id,buyer_name,buyer_mobile,message,status,created_at,updated_at,buyer_user_id,seller_approved_at,expires_at,paid_at",
         "order": "created_at.desc",
         "limit": str(requests_per_page),
         "offset": str((requests_page - 1) * requests_per_page),
     }
+    own_listing_ids = []
     if not listing_staff:
         listing_params["owner_user_id"] = f"eq.{user['id']}"
-    if not listing_staff:
-        request_params["buyer_user_id"] = f"eq.{user['id']}"
+        own_rows = sb_request(
+            "GET", "/rest/v1/listings",
+            params={"owner_user_id": f"eq.{user['id']}", "select": "id", "deleted_at": "is.null", "limit": "1000"},
+        ) or []
+        own_listing_ids = [str(row["id"]) for row in own_rows if row.get("id") is not None]
+        if own_listing_ids:
+            request_params["or"] = (
+                f"(buyer_user_id.eq.{user['id']},listing_id.in.(" + ",".join(own_listing_ids) + "))"
+            )
+        else:
+            request_params["buyer_user_id"] = f"eq.{user['id']}"
 
     if listings_status == "deleted":
         listing_params["deleted_at"] = "not.is.null"
@@ -409,7 +419,7 @@ def get_account_data(user, query=None):
         elif listings_status != "all":
             listings_status = "all"
 
-    if requests_status in ("pending", "forwarded"):
+    if requests_status in ("pending", "approved", "forwarded", "rejected", "expired", "paid"):
         request_params["status"] = f"eq.{requests_status}"
     elif requests_status != "all":
         requests_status = "all"
@@ -465,15 +475,28 @@ def get_account_data(user, query=None):
             owner_id = str(listing.get("owner_user_id") or "")
             listing["seller_account"] = seller_profiles.get(owner_id)
 
-    titles = {
-        str(item.get("id")): item.get("title") or item.get("product_type") or "آگهی"
-        for item in listings
-    }
+    request_listing_ids = sorted({str(row.get("listing_id")) for row in requests_rows if row.get("listing_id") is not None})
+    request_listing_map = {}
+    if request_listing_ids:
+        linked_rows = sb_request(
+            "GET", "/rest/v1/listings",
+            params={
+                "id": "in.(" + ",".join(request_listing_ids) + ")",
+                "select": "id,title,product_type,owner_user_id,seller_mobile",
+                "limit": str(len(request_listing_ids)),
+            },
+        ) or []
+        request_listing_map = {str(row.get("id")): row for row in linked_rows}
     for request_row in requests_rows:
-        request_row["listing_title"] = titles.get(
-            str(request_row.get("listing_id")),
-            f"آگهی شماره {request_row.get('listing_id')}",
-        )
+        linked = request_listing_map.get(str(request_row.get("listing_id")), {})
+        request_row["listing_title"] = linked.get("title") or linked.get("product_type") or f"آگهی شماره {request_row.get('listing_id')}"
+        request_row["is_seller_request"] = str(linked.get("owner_user_id") or "") == str(user.get("id") or "")
+        # Seller contact details are returned only to the buyer after a verified payment.
+        if request_row.get("status") == "paid" and str(request_row.get("buyer_user_id") or "") == str(user.get("id") or ""):
+            request_row["seller_contact"] = clean(linked.get("seller_mobile"), 30) or None
+        else:
+            request_row.pop("seller_contact", None)
+        # Buyer contact details are not disclosed to sellers through the dashboard.
         if not listing_staff:
             request_row.pop("buyer_mobile", None)
 
@@ -932,6 +955,51 @@ def owner_listing_action(user, data, dry_run=False):
         return {"ok": True, "preview": True, "message": "اعتبارسنجی مالکیت و عملیات آگهی انجام شد؛ تغییری ذخیره نشد."}
     row = update_listing_status(listing_id, patch, filters)
     return {"ok": True, "listing": row, "message": "آگهی شما به‌روزرسانی شد."}
+
+
+def seller_purchase_action(user, data, dry_run=False):
+    require_complete_profile(user)
+    try:
+        request_id = int(data.get("request_id", 0))
+    except (TypeError, ValueError):
+        raise ValueError("شناسه درخواست خرید معتبر نیست.")
+    action = clean(data.get("request_action"), 20)
+    if action not in {"approve", "reject"}:
+        raise ValueError("عملیات درخواست خرید معتبر نیست.")
+    request_rows = sb_request(
+        "GET", "/rest/v1/purchase_requests",
+        params={"id": f"eq.{request_id}", "select": "id,listing_id,status", "limit": "1"},
+    ) or []
+    if not request_rows:
+        raise ValueError("درخواست خرید پیدا نشد.")
+    request_row = request_rows[0]
+    listing = get_listing(request_row.get("listing_id"))
+    if not listing or str(listing.get("owner_user_id") or "") != str(user.get("id") or ""):
+        raise AuthError("شما فقط می‌توانید درخواست‌های آگهی‌های خودتان را بررسی کنید.")
+    if request_row.get("status") != "pending":
+        raise ValueError("این درخواست قبلاً بررسی شده یا دیگر فعال نیست.")
+    if dry_run:
+        return {"ok": True, "preview": True, "message": "اعتبارسنجی درخواست انجام شد؛ تغییری ذخیره نشد."}
+    now = datetime.now(timezone.utc)
+    patch = {
+        "status": "approved" if action == "approve" else "rejected",
+        "updated_at": now.isoformat(),
+        "seller_approved_at": now.isoformat() if action == "approve" else None,
+        "expires_at": (now + timedelta(hours=24)).isoformat() if action == "approve" else None,
+    }
+    rows = sb_request(
+        "PATCH", "/rest/v1/purchase_requests",
+        params={"id": f"eq.{request_id}", "status": "eq.pending"},
+        payload=patch,
+        prefer="return=representation",
+    ) or []
+    if not rows:
+        raise ValueError("وضعیت درخواست هم‌زمان تغییر کرده است؛ صفحه را تازه‌سازی کنید.")
+    return {
+        "ok": True,
+        "request": rows[0],
+        "message": "درخواست تأیید شد؛ خریدار می‌تواند هزینه دریافت اطلاعات تماس را پرداخت کند." if action == "approve" else "درخواست رد شد.",
+    }
 
 
 def admin_purchase_action(user, data, dry_run=False):
@@ -1521,7 +1589,7 @@ def save_purchase_request(data, user):
     existing = sb_request("GET", "/rest/v1/purchase_requests", params={
         "listing_id": f"eq.{listing_id}",
         "buyer_mobile": f"eq.{phone_digits(buyer_mobile)}",
-        "status": "in.(pending,forwarded)", "select": "id", "limit": "1",
+        "status": "in.(pending,approved,forwarded,paid)", "select": "id", "limit": "1",
     }) or []
     if existing:
         raise ValueError("درخواست قبلی شما برای این آگهی ثبت شده است.")
@@ -1676,11 +1744,13 @@ class handler(BaseHTTPRequestHandler):
                 result = edit_listing(fields, uploads, user, dry_run=PREVIEW_DRY_RUN)
                 respond(self, 200, result)
                 return
-            if fields.get("action") in ("admin_listing_action", "owner_listing_action", "admin_purchase_action"):
+            if fields.get("action") in ("admin_listing_action", "owner_listing_action", "admin_purchase_action", "seller_purchase_action"):
                 if fields.get("action") == "admin_listing_action":
                     result = admin_listing_action(user, fields, dry_run=PREVIEW_DRY_RUN)
                 elif fields.get("action") == "owner_listing_action":
                     result = owner_listing_action(user, fields, dry_run=PREVIEW_DRY_RUN)
+                elif fields.get("action") == "seller_purchase_action":
+                    result = seller_purchase_action(user, fields, dry_run=PREVIEW_DRY_RUN)
                 else:
                     result = admin_purchase_action(user, fields, dry_run=PREVIEW_DRY_RUN)
                 respond(self, 200, result)
@@ -1705,16 +1775,9 @@ class handler(BaseHTTPRequestHandler):
                 return
             if not uploads and fields.get("action") == "purchase":
                 request_row, listing = save_purchase_request(fields, user)
-                notified = False
-                try:
-                    notify_purchase_admin(request_row, listing)
-                    notified = True
-                except Exception as exc:
-                    print("PURCHASE NOTIFICATION FAILED:", str(exc)[:250])
-                respond(self, 201 if notified else 202, {
+                respond(self, 201, {
                     "ok": True, "request_id": request_row["id"],
-                    "admin_notification_sent": notified,
-                    "message": "درخواست خرید ثبت شد. از ثبت دوباره خودداری کنید.",
+                    "message": "درخواست شما برای بررسی به فروشنده ارسال شد.",
                 })
                 return
             result = create_listing(fields, uploads, user)
