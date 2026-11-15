@@ -585,7 +585,7 @@ def get_admin_members(user, query=None):
     return {'ok':True,'members':page_members,'pagination':{'page':page,'per_page':per_page,'total':total,'total_pages':max(1,(total+per_page-1)//per_page),'search':search,'status':status_filter,'role':role_filter,'listings':listing_filter,'sort':sort_by}}
 
 def record_admin_audit(user, target_user_id, action, old_values=None, new_values=None):
-    require_admin(user)
+    require_member_manager(user)
     sb_request('POST', '/rest/v1/admin_audit_logs', payload={'actor_user_id':str(user.get('id')),'target_user_id':str(target_user_id),'action':clean(action,60),'old_values':old_values or {},'new_values':new_values or {},'created_at':now_iso()}, prefer='return=minimal')
 
 def get_admin_member_audit(user, query=None):
