@@ -1797,8 +1797,15 @@ def save_purchase_request(data, user):
     if not listing or listing.get("status") != "published" or listing.get("deleted_at"):
         raise ValueError("این آگهی دیگر برای خرید در دسترس نیست.")
     buyer_name = clean(profile.get("full_name"), 100)
+    # In the isolated Staging project, email-authenticated test accounts may use
+    # the contact number saved in their profile without sending a real SMS.
+    # Production always requires the phone number verified by Supabase Auth.
     buyer_mobile = clean(user.get("phone"), 30)
+    if not buyer_mobile and is_staging_email_user(user):
+        buyer_mobile = clean(profile.get("mobile"), 30)
     if not buyer_name or not buyer_mobile:
+        if is_staging_email_user(user):
+            raise ValueError("برای ثبت درخواست آزمایشی، نام و شماره تماس معتبر را در پروفایل وارد کنید.")
         raise ValueError("نام و شماره موبایل تأییدشده حساب برای ثبت درخواست الزامی است.")
     if not valid_phone(buyer_mobile):
         raise ValueError("شماره تماس معتبر نیست.")
