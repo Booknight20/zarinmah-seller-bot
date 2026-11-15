@@ -21,7 +21,7 @@ PREVIEW_DRY_RUN = os.environ.get("ZARINMAH_PREVIEW_DRY_RUN", "").strip().lower()
 # Enable only after the image_url_2 database migration has been applied.
 SECOND_IMAGE_ENABLED = os.environ.get("ZARINMAH_SECOND_IMAGE_ENABLED", "").strip().lower() == "true"
 ZARINPAL_MERCHANT_ID = os.environ.get("ZARINPAL_MERCHANT_ID", "").strip()
-ZARINPAL_SANDBOX = os.environ.get("ZARINPAL_SANDBOX", "").strip().lower() == "true"
+ZARINPAL_SANDBOX = os.environ.get("ZARINPAL_SANDBOX", "true").strip().lower() == "true"
 try:
     PURCHASE_ACCESS_FEE_TOMAN = max(1000, int(os.environ.get("PURCHASE_ACCESS_FEE_TOMAN", "50000")))
 except (TypeError, ValueError):
@@ -1678,12 +1678,19 @@ def payment_callback(handler, query):
         },
     ) or []
     if not rows:
-        respond_redirect(handler, "https://zarinmahgold.ir/account?purchase_payment=failed")
+        respond(handler, 400, {"ok": False, "error": "تراکنش پرداخت پیدا نشد."})
         return
     payment = rows[0]
     return_url = safe_payment_return_url(payment.get("return_url"))
     if payment.get("status") == "paid":
-        respond_redirect(handler, return_url + "?purchase_payment=success")
+        request_rows = sb_request(
+            "GET", "/rest/v1/purchase_requests",
+            params={"id": f"eq.{payment['request_id']}", "buyer_user_id": f"eq.{payment['buyer_user_id']}", "select": "id,status", "limit": "1"},
+        ) or []
+        if request_rows and request_rows[0].get("status") == "paid":
+            respond_redirect(handler, return_url + "?purchase_payment=success")
+        else:
+            respond_redirect(handler, return_url + "?purchase_payment=review")
         return
     if gateway_status != "OK":
         sb_request(
