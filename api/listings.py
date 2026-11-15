@@ -484,18 +484,20 @@ def get_account_data(user, query=None):
         "listings": listings,
         "purchase_requests": requests_rows,
         "pagination": {
-            "per_page": per_page,
+            "per_page": listings_per_page,
             "listings": {
                 "page": listings_page,
+                "per_page": listings_per_page,
                 "total": listings_total,
-                "total_pages": max(1, (listings_total + per_page - 1) // per_page),
+                "total_pages": max(1, (listings_total + listings_per_page - 1) // listings_per_page),
                 "status": listings_status,
                 "search": listings_search,
             },
             "requests": {
                 "page": requests_page,
+                "per_page": requests_per_page,
                 "total": requests_total,
-                "total_pages": max(1, (requests_total + per_page - 1) // per_page),
+                "total_pages": max(1, (requests_total + requests_per_page - 1) // requests_per_page),
                 "status": requests_status,
                 "search": requests_search,
             },
