@@ -499,7 +499,14 @@ def get_account_data(user, query=None):
         request_row["is_seller_request"] = str(linked.get("owner_user_id") or "") == str(user.get("id") or "")
         # Seller contact details are returned only to the buyer after a verified payment.
         if request_row.get("status") == "paid" and str(request_row.get("buyer_user_id") or "") == str(user.get("id") or ""):
-            request_row["seller_contact"] = clean(linked.get("seller_mobile"), 30) or None
+            seller_contact = clean(linked.get("seller_mobile"), 30)
+            if not valid_phone(seller_contact) and linked.get("owner_user_id"):
+                seller_profiles = sb_request(
+                    "GET", "/rest/v1/profiles",
+                    params={"id": f"eq.{linked['owner_user_id']}", "select": "mobile", "limit": "1"},
+                ) or []
+                seller_contact = clean(seller_profiles[0].get("mobile"), 30) if seller_profiles else ""
+            request_row["seller_contact"] = seller_contact if valid_phone(seller_contact) else None
         else:
             request_row.pop("seller_contact", None)
         # Buyer contact details are not disclosed to sellers through the dashboard.
@@ -1576,7 +1583,10 @@ def public_listing(item):
 def safe_payment_return_url(value):
     parsed = urlparse(clean(value, 1000))
     host = (parsed.hostname or "").lower()
-    allowed = host == "zarinmahgold.ir" or host == "www.zarinmahgold.ir" or host.endswith(".vercel.app")
+    allowed = (
+        host in {"zarinmahgold.ir", "www.zarinmahgold.ir"}
+        or (host.startswith("zarinmah-storefront-") and host.endswith(".vercel.app"))
+    )
     if parsed.scheme != "https" or not allowed or parsed.username or parsed.password:
         raise ValueError("نشانی بازگشت پرداخت معتبر نیست.")
     return f"https://{host}/account"
@@ -1602,6 +1612,18 @@ def create_purchase_payment(data, user, handler, dry_run=False):
         raise ValueError("هزینه این درخواست قبلاً پرداخت شده است.")
     if request_row.get("status") != "approved":
         raise ValueError("ابتدا باید فروشنده درخواست شما را تأیید کند.")
+    listing = get_listing(request_row.get("listing_id"))
+    if not listing:
+        raise ValueError("آگهی موردنظر دیگر در دسترس نیست.")
+    seller_contact = clean(listing.get("seller_mobile"), 30)
+    if not valid_phone(seller_contact) and listing.get("owner_user_id"):
+        seller_profiles = sb_request(
+            "GET", "/rest/v1/profiles",
+            params={"id": f"eq.{listing['owner_user_id']}", "select": "mobile", "limit": "1"},
+        ) or []
+        seller_contact = clean(seller_profiles[0].get("mobile"), 30) if seller_profiles else ""
+    if not valid_phone(seller_contact):
+        raise ValueError("شماره تماس معتبر فروشنده ثبت نشده است؛ پرداخت فعلاً امکان‌پذیر نیست.")
     expires_at = request_row.get("expires_at")
     if expires_at:
         expiry = datetime.fromisoformat(str(expires_at).replace("Z", "+00:00"))
@@ -1613,7 +1635,7 @@ def create_purchase_payment(data, user, handler, dry_run=False):
             )
             raise ValueError("مهلت پرداخت این درخواست به پایان رسیده است.")
     if not ZARINPAL_MERCHANT_ID:
-        raise RuntimeError("درگاه پرداخت هنوز در تنظیمات نسخه آزمایشی فعال نشده است.")
+        raise ValueError("درگاه پرداخت هنوز فعال نشده است؛ پس از تنظیم پذیرنده، امکان پرداخت فراهم می‌شود.")
     return_url = safe_payment_return_url(data.get("return_url"))
     api_host = clean(handler.headers.get("Host"), 200)
     if not api_host or not re.fullmatch(r"[A-Za-z0-9.-]+(?::\d{1,5})?", api_host):
