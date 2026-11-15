@@ -515,6 +515,7 @@ def get_account_data(user, query=None):
 
     return {
         "ok": True,
+        "server_now": now_iso(),
         "profile": profile,
         "role": role,
         "listings": listings,
