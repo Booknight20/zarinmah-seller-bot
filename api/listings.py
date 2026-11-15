@@ -532,76 +532,69 @@ def get_admin_dashboard_stats(user):
 def get_admin_members(user, query=None):
     require_member_manager(user)
     query = query or {}
-    page = account_page((query.get("members_page") or ["1"])[0])
-    search = account_search((query.get("members_search") or [""])[0])
-    per_page = 20
-    include_national_id = get_user_role(user) == "admin"
-    profile_fields = "id,full_name,mobile,province,city,address,is_active,created_at,updated_at"
-    if include_national_id:
-        profile_fields = profile_fields.replace("address,", "address,national_id,")
-    params = {
-        "select": profile_fields,
-        "order": "created_at.desc",
-        "limit": str(per_page),
-        "offset": str((page - 1) * per_page),
-    }
+    page = account_page((query.get('members_page') or ['1'])[0])
+    search = account_search((query.get('members_search') or [''])[0])
+    status_filter = clean((query.get('members_status') or ['all'])[0], 20)
+    role_filter = clean((query.get('members_role') or ['all'])[0], 40)
+    listing_filter = clean((query.get('members_listings') or ['all'])[0], 20)
+    sort_by = clean((query.get('members_sort') or ['newest'])[0], 20)
+    if status_filter not in {'all', 'active', 'inactive'}: status_filter = 'all'
+    if role_filter not in {'all', 'user', 'listing_manager', 'member_manager', 'admin'}: role_filter = 'all'
+    if listing_filter not in {'all', 'with', 'without'}: listing_filter = 'all'
+    if sort_by not in {'newest', 'oldest', 'most_listings'}: sort_by = 'newest'
+    include_national_id = get_user_role(user) == 'admin'
+    profile_fields = 'id,full_name,mobile,province,city,address,is_active,created_at,updated_at'
+    if include_national_id: profile_fields = profile_fields.replace('address,', 'address,national_id,')
+    params = {'select': profile_fields, 'order': 'created_at.desc', 'limit': '10000', 'offset': '0'}
     if search:
-        term = f"*{search}*"
-        params["or"] = f"(full_name.ilike.{term},mobile.ilike.{term})"
-    members, total = sb_request_counted("/rest/v1/profiles", params)
-    member_ids = [str(item.get("id")) for item in members if item.get("id")]
-    counts = {}
-    for member_id in member_ids:
-        counts[member_id] = {"total": 0, "active": 0, "pending": 0, "published": 0, "sold": 0, "deleted": 0}
-    if member_ids:
-        rows = sb_request(
-            "GET", "/rest/v1/listings",
-            params={
-                "select": "owner_user_id,status,deleted_at",
-                "owner_user_id": "in.(" + ",".join(member_ids) + ")",
-                "limit": "10000",
-            },
-        ) or []
-        for row in rows:
-            owner = str(row.get("owner_user_id") or "")
-            if owner not in counts:
-                continue
-            item = counts[owner]
-            item["total"] += 1
-            if row.get("deleted_at") is not None:
-                item["deleted"] += 1
+        term = '*' + search + '*'
+        params['or'] = '(full_name.ilike.' + term + ',mobile.ilike.' + term + ')'
+    if status_filter == 'active': params['is_active'] = 'eq.true'
+    elif status_filter == 'inactive': params['is_active'] = 'eq.false'
+    members = sb_request('GET', '/rest/v1/profiles', params=params) or []
+    all_ids = [str(item.get('id')) for item in members if item.get('id')]
+    role_map, listing_counts = {}, {}
+    if all_ids:
+        role_rows = sb_request('GET', '/rest/v1/user_roles', params={'select':'user_id,role','user_id':'in.(' + ','.join(all_ids) + ')','limit':'10000'}) or []
+        role_map = {str(row.get('user_id')): row.get('role') or 'user' for row in role_rows}
+        listing_rows = sb_request('GET', '/rest/v1/listings', params={'select':'owner_user_id,status,deleted_at','owner_user_id':'in.(' + ','.join(all_ids) + ')','limit':'10000'}) or []
+        for row in listing_rows:
+            owner = str(row.get('owner_user_id') or '')
+            if owner not in all_ids: continue
+            item = listing_counts.setdefault(owner, {'total':0,'active':0,'pending':0,'published':0,'sold':0,'deleted':0})
+            item['total'] += 1
+            if row.get('deleted_at') is not None: item['deleted'] += 1
             else:
-                item["active"] += 1
-                status = row.get("status")
-                if status in ("pending", "published", "sold"):
-                    item[status] += 1
-    roles = {}
-    if member_ids:
-        role_rows = sb_request(
-            "GET", "/rest/v1/user_roles",
-            params={
-                "select": "user_id,role",
-                "user_id": "in.(" + ",".join(member_ids) + ")",
-                "limit": "1000",
-            },
-        ) or []
-        roles = {str(row.get("user_id")): row.get("role") or "user" for row in role_rows}
+                item['active'] += 1
+                if row.get('status') in ('pending','published','sold'): item[row['status']] += 1
+    filtered = []
     for member in members:
-        member["listing_counts"] = counts.get(str(member.get("id")), {})
-        member["role"] = roles.get(str(member.get("id")), "user")
-    return {
-        "ok": True,
-        "members": members,
-        "pagination": {
-            "page": page,
-            "per_page": per_page,
-            "total": total,
-            "total_pages": max(1, (total + per_page - 1) // per_page),
-            "search": search,
-        },
-    }
+        mid = str(member.get('id'))
+        member['role'] = role_map.get(mid, 'user')
+        member['listing_counts'] = listing_counts.get(mid, {'total':0,'active':0,'pending':0,'published':0,'sold':0,'deleted':0})
+        if role_filter != 'all' and member['role'] != role_filter: continue
+        has_listings = member['listing_counts']['total'] > 0
+        if listing_filter == 'with' and not has_listings: continue
+        if listing_filter == 'without' and has_listings: continue
+        filtered.append(member)
+    if sort_by == 'most_listings': filtered.sort(key=lambda m: (m['listing_counts']['total'], m.get('created_at') or ''), reverse=True)
+    elif sort_by == 'oldest': filtered.sort(key=lambda m: m.get('created_at') or '')
+    else: filtered.sort(key=lambda m: m.get('created_at') or '', reverse=True)
+    total, per_page = len(filtered), 20
+    page_members = filtered[(page-1)*per_page:page*per_page]
+    return {'ok':True,'members':page_members,'pagination':{'page':page,'per_page':per_page,'total':total,'total_pages':max(1,(total+per_page-1)//per_page),'search':search,'status':status_filter,'role':role_filter,'listings':listing_filter,'sort':sort_by}}
 
+def record_admin_audit(user, target_user_id, action, old_values=None, new_values=None):
+    require_admin(user)
+    sb_request('POST', '/rest/v1/admin_audit_logs', payload={'actor_user_id':str(user.get('id')),'target_user_id':str(target_user_id),'action':clean(action,60),'old_values':old_values or {},'new_values':new_values or {},'created_at':now_iso()}, prefer='return=minimal')
 
+def get_admin_member_audit(user, query=None):
+    require_admin(user)
+    query = query or {}
+    member_id = clean((query.get('member_id') or [''])[0], 80)
+    if not re.fullmatch(r'[0-9a-fA-F-]{36}', member_id): raise ValueError('شناسه عضو معتبر نیست.')
+    rows = sb_request('GET','/rest/v1/admin_audit_logs',params={'select':'id,actor_user_id,target_user_id,action,old_values,new_values,created_at','target_user_id':'eq.'+member_id,'order':'created_at.desc','limit':'50'}) or []
+    return {'ok':True,'audit':rows}
 def get_admin_member_listings(user, query=None):
     require_roles(user, {"admin", "listing_manager", "member_manager"})
     query = query or {}
@@ -669,6 +662,7 @@ def admin_member_update(user, data):
     ) or []
     if not rows:
         raise ValueError("عضو پیدا نشد یا اطلاعات او به‌روزرسانی نشد.")
+    record_admin_audit(user, member_id, "member_profile_update", {}, {"full_name": full_name, "is_active": active_value})
     return {"ok": True, "member": rows[0], "message": "اطلاعات عضو به‌روزرسانی شد."}
 
 
@@ -714,6 +708,7 @@ def admin_member_role_update(user, data):
         ) or []
     if not rows:
         raise ValueError("تغییر نقش ذخیره نشد؛ ممکن است نقش عضو هم‌زمان تغییر کرده باشد. فهرست را تازه‌سازی کنید.")
+    record_admin_audit(user, member_id, "member_role_update", {"role": old_role}, {"role": new_role})
     return {
         "ok": True,
         "changed": True,
@@ -1595,6 +1590,10 @@ class handler(BaseHTTPRequestHandler):
             if action == "admin_members":
                 user = authenticate_user(self)
                 respond(self, 200, get_admin_members(user, query))
+                return
+            if action == "admin_member_audit":
+                user = authenticate_user(self)
+                respond(self, 200, get_admin_member_audit(user, query))
                 return
             if action == "admin_member_listings":
                 user = authenticate_user(self)
