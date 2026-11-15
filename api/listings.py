@@ -6,7 +6,7 @@ from datetime import datetime, timedelta, timezone
 from email import policy
 from email.parser import BytesParser
 from http.server import BaseHTTPRequestHandler
-from urllib.parse import parse_qs, quote
+from urllib.parse import parse_qs, quote, urlencode, urlparse
 
 import requests
 
@@ -20,6 +20,12 @@ SUPABASE_TIMEOUT = 30
 PREVIEW_DRY_RUN = os.environ.get("ZARINMAH_PREVIEW_DRY_RUN", "").strip().lower() == "true"
 # Enable only after the image_url_2 database migration has been applied.
 SECOND_IMAGE_ENABLED = os.environ.get("ZARINMAH_SECOND_IMAGE_ENABLED", "").strip().lower() == "true"
+ZARINPAL_MERCHANT_ID = os.environ.get("ZARINPAL_MERCHANT_ID", "").strip()
+ZARINPAL_SANDBOX = os.environ.get("ZARINPAL_SANDBOX", "").strip().lower() == "true"
+try:
+    PURCHASE_ACCESS_FEE_TOMAN = max(1000, int(os.environ.get("PURCHASE_ACCESS_FEE_TOMAN", "50000")))
+except (TypeError, ValueError):
+    PURCHASE_ACCESS_FEE_TOMAN = 50000
 MAX_BODY_SIZE = 4 * 1024 * 1024
 MAX_FILE_SIZE = 1536 * 1024
 MAX_PHOTO_SIZE = 500 * 1024
@@ -1567,6 +1573,184 @@ def public_listing(item):
     }
 
 
+def safe_payment_return_url(value):
+    parsed = urlparse(clean(value, 1000))
+    host = (parsed.hostname or "").lower()
+    allowed = host == "zarinmahgold.ir" or host == "www.zarinmahgold.ir" or host.endswith(".vercel.app")
+    if parsed.scheme != "https" or not allowed or parsed.username or parsed.password:
+        raise ValueError("نشانی بازگشت پرداخت معتبر نیست.")
+    return f"https://{host}/account"
+
+
+def create_purchase_payment(data, user, handler, dry_run=False):
+    require_complete_profile(user)
+    try:
+        request_id = int(data.get("request_id", 0))
+    except (TypeError, ValueError):
+        raise ValueError("شناسه درخواست خرید معتبر نیست.")
+    rows = sb_request(
+        "GET", "/rest/v1/purchase_requests",
+        params={
+            "id": f"eq.{request_id}", "buyer_user_id": f"eq.{user['id']}",
+            "select": "id,listing_id,status,expires_at", "limit": "1",
+        },
+    ) or []
+    if not rows:
+        raise ValueError("درخواست خرید پیدا نشد.")
+    request_row = rows[0]
+    if request_row.get("status") == "paid":
+        raise ValueError("هزینه این درخواست قبلاً پرداخت شده است.")
+    if request_row.get("status") != "approved":
+        raise ValueError("ابتدا باید فروشنده درخواست شما را تأیید کند.")
+    expires_at = request_row.get("expires_at")
+    if expires_at:
+        expiry = datetime.fromisoformat(str(expires_at).replace("Z", "+00:00"))
+        if expiry <= datetime.now(timezone.utc):
+            sb_request(
+                "PATCH", "/rest/v1/purchase_requests",
+                params={"id": f"eq.{request_id}", "status": "eq.approved"},
+                payload={"status": "expired", "updated_at": now_iso()},
+            )
+            raise ValueError("مهلت پرداخت این درخواست به پایان رسیده است.")
+    if not ZARINPAL_MERCHANT_ID:
+        raise RuntimeError("درگاه پرداخت هنوز در تنظیمات نسخه آزمایشی فعال نشده است.")
+    return_url = safe_payment_return_url(data.get("return_url"))
+    api_host = clean(handler.headers.get("Host"), 200)
+    if not api_host or not re.fullmatch(r"[A-Za-z0-9.-]+(?::\d{1,5})?", api_host):
+        raise RuntimeError("نشانی سرور پرداخت معتبر نیست.")
+    callback_url = f"https://{api_host}/api/listings?action=payment_callback"
+    amount_rial = PURCHASE_ACCESS_FEE_TOMAN * 10
+    api_base = "https://sandbox.zarinpal.com" if ZARINPAL_SANDBOX else "https://payment.zarinpal.com"
+    try:
+        response = requests.post(
+            api_base + "/pg/v4/payment/request.json",
+            json={
+                "merchant_id": ZARINPAL_MERCHANT_ID,
+                "amount": amount_rial,
+                "callback_url": callback_url,
+                "description": f"هزینه دریافت اطلاعات تماس فروشنده - درخواست {request_id}",
+                "metadata": {"mobile": phone_digits(user.get("phone")), "order_id": str(request_id)},
+            },
+            timeout=20,
+        )
+        payload = response.json()
+    except (requests.RequestException, ValueError):
+        raise RuntimeError("ارتباط با درگاه پرداخت برقرار نشد؛ کمی بعد دوباره تلاش کنید.")
+    data_block = payload.get("data") or {}
+    if not response.ok or data_block.get("code") != 100 or not data_block.get("authority"):
+        errors = payload.get("errors") or {}
+        raise RuntimeError(clean(errors.get("message") or "درگاه نتوانست درخواست پرداخت را ایجاد کند.", 300))
+    authority = clean(data_block.get("authority"), 100)
+    payment_rows = sb_request(
+        "POST", "/rest/v1/purchase_access_payments",
+        params={"on_conflict": "request_id"},
+        payload={
+            "request_id": request_id,
+            "buyer_user_id": user["id"],
+            "provider": "zarinpal",
+            "amount_toman": PURCHASE_ACCESS_FEE_TOMAN,
+            "amount_rial": amount_rial,
+            "authority": authority,
+            "return_url": return_url,
+            "status": "pending",
+            "updated_at": now_iso(),
+        },
+        prefer="resolution=merge-duplicates,return=representation",
+    ) or []
+    if not payment_rows:
+        raise RuntimeError("ثبت امن اطلاعات پرداخت انجام نشد؛ با پشتیبانی تماس بگیرید.")
+    start_path = "/pg/StartPay/" if not ZARINPAL_SANDBOX else "/pg/StartPay/"
+    return {
+        "ok": True,
+        "payment_url": api_base + start_path + authority,
+        "amount_toman": PURCHASE_ACCESS_FEE_TOMAN,
+        "message": "در حال انتقال به درگاه پرداخت امن زرین‌پال هستید.",
+    }
+
+
+def payment_callback(handler, query):
+    authority = clean((query.get("Authority") or [""])[0], 100)
+    gateway_status = clean((query.get("Status") or [""])[0], 20).upper()
+    rows = sb_request(
+        "GET", "/rest/v1/purchase_access_payments",
+        params={
+            "authority": f"eq.{authority}", "select": "*", "limit": "1",
+        },
+    ) or []
+    if not rows:
+        respond_redirect(handler, "https://zarinmahgold.ir/account?purchase_payment=failed")
+        return
+    payment = rows[0]
+    return_url = safe_payment_return_url(payment.get("return_url"))
+    if payment.get("status") == "paid":
+        respond_redirect(handler, return_url + "?purchase_payment=success")
+        return
+    if gateway_status != "OK":
+        sb_request(
+            "PATCH", "/rest/v1/purchase_access_payments",
+            params={"id": f"eq.{payment['id']}", "status": "eq.pending"},
+            payload={"status": "failed", "updated_at": now_iso()},
+        )
+        respond_redirect(handler, return_url + "?purchase_payment=cancelled")
+        return
+    if not ZARINPAL_MERCHANT_ID:
+        respond_redirect(handler, return_url + "?purchase_payment=failed")
+        return
+    api_base = "https://sandbox.zarinpal.com" if ZARINPAL_SANDBOX else "https://payment.zarinpal.com"
+    try:
+        response = requests.post(
+            api_base + "/pg/v4/payment/verify.json",
+            json={
+                "merchant_id": ZARINPAL_MERCHANT_ID,
+                "amount": int(payment.get("amount_rial") or 0),
+                "authority": authority,
+            },
+            timeout=20,
+        )
+        payload = response.json()
+    except (requests.RequestException, ValueError):
+        respond_redirect(handler, return_url + "?purchase_payment=verify_error")
+        return
+    result = payload.get("data") or {}
+    if not response.ok or result.get("code") not in (100, 101):
+        sb_request(
+            "PATCH", "/rest/v1/purchase_access_payments",
+            params={"id": f"eq.{payment['id']}", "status": "eq.pending"},
+            payload={"status": "failed", "updated_at": now_iso()},
+        )
+        respond_redirect(handler, return_url + "?purchase_payment=failed")
+        return
+    ref_id = clean(result.get("ref_id"), 100)
+    updated = sb_request(
+        "PATCH", "/rest/v1/purchase_access_payments",
+        params={"id": f"eq.{payment['id']}", "status": "eq.pending"},
+        payload={"status": "paid", "reference_id": ref_id, "verified_at": now_iso(), "updated_at": now_iso()},
+        prefer="return=representation",
+    ) or []
+    if not updated and payment.get("status") != "paid":
+        respond_redirect(handler, return_url + "?purchase_payment=verify_error")
+        return
+    request_rows = sb_request(
+        "PATCH", "/rest/v1/purchase_requests",
+        params={"id": f"eq.{payment['request_id']}", "buyer_user_id": f"eq.{payment['buyer_user_id']}", "status": "eq.approved"},
+        payload={"status": "paid", "paid_at": now_iso(), "updated_at": now_iso()},
+        prefer="return=representation",
+    ) or []
+    if not request_rows:
+        # Do not reveal seller details if the request could not be transitioned.
+        respond_redirect(handler, return_url + "?purchase_payment=verify_error")
+        return
+    respond_redirect(handler, return_url + "?purchase_payment=success")
+
+
+def respond_redirect(handler, url):
+    handler.send_response(302)
+    handler.send_header("Location", url)
+    handler.send_header("Cache-Control", "no-store")
+    handler.send_header("Content-Length", "0")
+    handler.end_headers()
+
+
 def save_purchase_request(data, user):
     profile = require_complete_profile(user)
     try:
@@ -1644,6 +1828,9 @@ class handler(BaseHTTPRequestHandler):
         try:
             query = parse_qs(self.path.split("?", 1)[1]) if "?" in self.path else {}
             action = query.get("action", [""])[0]
+            if action == "payment_callback":
+                payment_callback(self, query)
+                return
             if action == "profile":
                 user = authenticate_user(self)
                 profile = get_user_profile(user)
@@ -1711,6 +1898,10 @@ class handler(BaseHTTPRequestHandler):
                 respond(self, 202, record_site_visit(fields))
                 return
             user = authenticate_user(self)
+            if fields.get("action") == "create_purchase_payment":
+                result = create_purchase_payment(fields, user, self, dry_run=PREVIEW_DRY_RUN)
+                respond(self, 200, result)
+                return
             if fields.get("action") == "complete_profile":
                 # Allow only the minimal account-profile write for email-authenticated
                 # test users in the isolated Staging project. All other preview writes
