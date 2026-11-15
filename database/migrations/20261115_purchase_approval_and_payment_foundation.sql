@@ -23,6 +23,7 @@ create table if not exists public.purchase_access_payments (
   amount_rial bigint not null check (amount_rial > 0),
   authority text unique,
   reference_id text,
+  return_url text,
   status text not null default 'created'
     check (status in ('created', 'pending', 'paid', 'failed', 'refunded')),
   created_at timestamptz not null default now(),
