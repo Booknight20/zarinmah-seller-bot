@@ -441,10 +441,14 @@ def get_account_data(user, query=None):
 
     if listings_search:
         term = f"*{listings_search}*"
-        listing_params["or"] = (
-            f"(title.ilike.{term},product_type.ilike.{term},"
+        search_filter = (
+            f"or(title.ilike.{term},product_type.ilike.{term},"
             f"seller_name.ilike.{term},seller_mobile.ilike.{term},city.ilike.{term})"
         )
+        if listings_status == "archive":
+            listing_params["and"] = f"(or(status.in.(sold,rejected),deleted_at.not.is.null),{search_filter})"
+        else:
+            listing_params["or"] = "(" + search_filter[3:] + ")"
     if requests_search:
         term = f"*{requests_search}*"
         request_params["or"] = (
