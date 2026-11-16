@@ -1844,6 +1844,9 @@ def save_purchase_request(data, user):
         raise ValueError("برای آگهی خودتان نمی‌توانید درخواست خرید ثبت کنید.")
     if phone_digits(buyer_mobile) == phone_digits(listing.get("seller_mobile")):
         raise ValueError("شماره تماس خریدار و فروشنده نمی‌تواند یکسان باشد.")
+    # Normalize overdue approvals before checking for an existing active request.
+    # Otherwise an approved request whose payment window elapsed can block a new request.
+    expire_approved_purchase_requests()
     existing = sb_request("GET", "/rest/v1/purchase_requests", params={
         "listing_id": f"eq.{listing_id}",
         "buyer_mobile": f"eq.{phone_digits(buyer_mobile)}",
