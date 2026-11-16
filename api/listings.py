@@ -374,9 +374,26 @@ def account_search(value):
     return re.sub(r"[^0-9A-Za-z\u0600-\u06FF\s@._+\-]", "", value).strip()
 
 
+def expire_approved_purchase_requests():
+    """Move approved requests past their payment deadline into the expired archive."""
+    now = datetime.now(timezone.utc)
+    now_iso = now.isoformat()
+    sb_request(
+        "PATCH", "/rest/v1/purchase_requests",
+        params={
+            "status": "eq.approved",
+            "expires_at": f"lte.{now_iso}",
+        },
+        payload={"status": "expired", "updated_at": now_iso},
+        prefer="return=minimal",
+    )
+
+
 def get_account_data(user, query=None):
     query = query or {}
     profile = require_complete_profile(user)
+    # Keep the current/archive/status filters accurate whenever the account is opened.
+    expire_approved_purchase_requests()
     role = get_user_role(user)
     admin = role == "admin"
     listing_staff = role in {"admin", "listing_manager"}
