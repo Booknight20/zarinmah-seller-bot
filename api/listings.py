@@ -572,6 +572,92 @@ def get_account_data(user, query=None):
     }
 
 
+def get_user_notifications(user):
+    """Return recent in-app notifications and create one-time payment deadline reminders."""
+    user_id = str(user.get("id") or "")
+    now = datetime.now(timezone.utc)
+    now_text = now.isoformat()
+    reminder_limit = (now + __import__("datetime").timedelta(hours=1)).isoformat()
+    due_soon = sb_request(
+        "GET", "/rest/v1/purchase_requests",
+        params={
+            "buyer_user_id": f"eq.{user_id}",
+            "status": "eq.approved",
+            "expires_at": f"gte.{now_text}",
+            "select": "id,listing_id,expires_at",
+            "limit": "100",
+        },
+    ) or []
+    for request_row in due_soon:
+        try:
+            expires_at = datetime.fromisoformat(str(request_row.get("expires_at") or "").replace("Z", "+00:00"))
+        except ValueError:
+            continue
+        if expires_at <= now or expires_at > now + __import__("datetime").timedelta(hours=1):
+            continue
+        listing_rows = sb_request(
+            "GET", "/rest/v1/listings",
+            params={
+                "id": f"eq.{request_row['listing_id']}",
+                "select": "title,product_type",
+                "limit": "1",
+            },
+        ) or []
+        listing_label = (listing_rows[0].get("title") or listing_rows[0].get("product_type") or "آگهی") if listing_rows else "آگهی"
+        sb_request(
+            "POST", "/rest/v1/user_notifications",
+            payload={
+                "recipient_user_id": user_id,
+                "event_key": f"payment-deadline:{request_row['id']}",
+                "notification_type": "payment_deadline",
+                "title": "کمتر از یک ساعت تا پایان مهلت پرداخت",
+                "message": f"مهلت پرداخت درخواست آگهی «{listing_label}» رو به پایان است.",
+                "request_id": request_row["id"],
+            },
+            prefer="resolution=ignore-duplicates,return=minimal",
+        )
+
+    notifications = sb_request(
+        "GET", "/rest/v1/user_notifications",
+        params={
+            "recipient_user_id": f"eq.{user_id}",
+            "select": "id,notification_type,title,message,request_id,created_at,read_at",
+            "order": "created_at.desc",
+            "limit": "30",
+        },
+    ) or []
+    unread = sb_request(
+        "GET", "/rest/v1/user_notifications",
+        params={
+            "recipient_user_id": f"eq.{user_id}",
+            "read_at": "is.null",
+            "select": "id",
+            "limit": "1000",
+        },
+    ) or []
+    return {"ok": True, "notifications": notifications, "unread_count": len(unread), "server_now": now_text}
+
+
+def mark_user_notification_read(user, data, mark_all=False):
+    user_id = str(user.get("id") or "")
+    filters = {"recipient_user_id": f"eq.{user_id}", "read_at": "is.null"}
+    if not mark_all:
+        try:
+            notification_id = int(data.get("notification_id", 0))
+        except (TypeError, ValueError):
+            raise ValueError("شناسه اعلان معتبر نیست.")
+        if notification_id <= 0:
+            raise ValueError("شناسه اعلان معتبر نیست.")
+        filters["id"] = f"eq.{notification_id}"
+    rows = sb_request(
+        "PATCH", "/rest/v1/user_notifications",
+        params=filters,
+        payload={"read_at": now_iso()},
+        prefer="return=representation",
+    ) or []
+    return {"ok": True, "updated": len(rows), "message": "اعلان به‌روزرسانی شد."}
+
+
 def record_site_visit(data):
     visitor_id = clean(data.get("visitor_id"), 64)
     session_id = clean(data.get("session_id"), 64)
@@ -1918,6 +2004,10 @@ class handler(BaseHTTPRequestHandler):
                 user = authenticate_user(self)
                 respond(self, 200, get_account_data(user, query))
                 return
+            if action == "notifications":
+                user = authenticate_user(self)
+                respond(self, 200, get_user_notifications(user))
+                return
             if action == "admin_dashboard_stats":
                 user = authenticate_user(self)
                 respond(self, 200, get_admin_dashboard_stats(user))
@@ -1975,6 +2065,12 @@ class handler(BaseHTTPRequestHandler):
                 respond(self, 202, record_site_visit(fields))
                 return
             user = authenticate_user(self)
+            if fields.get("action") == "mark_notification_read":
+                respond(self, 200, mark_user_notification_read(user, fields))
+                return
+            if fields.get("action") == "mark_all_notifications_read":
+                respond(self, 200, mark_user_notification_read(user, fields, mark_all=True))
+                return
             if fields.get("action") == "create_purchase_payment":
                 result = create_purchase_payment(fields, user, self, dry_run=PREVIEW_DRY_RUN)
                 respond(self, 200, result)
