@@ -577,7 +577,6 @@ def get_user_notifications(user):
     user_id = str(user.get("id") or "")
     now = datetime.now(timezone.utc)
     now_text = now.isoformat()
-    reminder_limit = (now + __import__("datetime").timedelta(hours=1)).isoformat()
     due_soon = sb_request(
         "GET", "/rest/v1/purchase_requests",
         params={
@@ -593,7 +592,7 @@ def get_user_notifications(user):
             expires_at = datetime.fromisoformat(str(request_row.get("expires_at") or "").replace("Z", "+00:00"))
         except ValueError:
             continue
-        if expires_at <= now or expires_at > now + __import__("datetime").timedelta(hours=1):
+        if expires_at <= now or expires_at > now + timedelta(hours=1):
             continue
         listing_rows = sb_request(
             "GET", "/rest/v1/listings",
