@@ -407,7 +407,7 @@ def get_account_data(user, query=None):
     requests_search = account_search((query.get("requests_search") or [""])[0])
 
     listing_params = {
-        "select": "id,title,product_type,weight,weight_unit,purity,province,city,description,pricing_method,pricing_value,price,image_url" + (",image_url_2" if SECOND_IMAGE_ENABLED else "") + ",status,created_at,updated_at,deleted_at,seller_name,seller_mobile,owner_user_id,invoice_path",
+        "select": "id,title,product_type,weight,weight_unit,purity,province,city,description,pricing_method,pricing_value,price,image_url" + (",image_url_2" if SECOND_IMAGE_ENABLED else "") + ",status,created_at,updated_at,deleted_at,seller_name,seller_mobile,owner_user_id,invoice_path,rejection_reason_code,rejection_reason_label,rejection_reason_text,rejected_at",
         "order": "created_at.desc",
         "limit": str(listings_per_page),
         "offset": str((listings_page - 1) * listings_per_page),
@@ -763,7 +763,7 @@ def get_admin_member_listings(user, query=None):
     per_page = 10
     status = clean((query.get("member_listings_status") or ["all"])[0], 20)
     params = {
-        "select": "id,title,product_type,weight,weight_unit,purity,province,city,description,pricing_method,pricing_value,price,image_url" + (",image_url_2" if SECOND_IMAGE_ENABLED else "") + ",status,created_at,updated_at,deleted_at,invoice_path",
+        "select": "id,title,product_type,weight,weight_unit,purity,province,city,description,pricing_method,pricing_value,price,image_url" + (",image_url_2" if SECOND_IMAGE_ENABLED else "") + ",status,created_at,updated_at,deleted_at,invoice_path,rejection_reason_code,rejection_reason_label,rejection_reason_text,rejected_at",
         "owner_user_id": f"eq.{member_id}",
         "order": "created_at.desc",
         "limit": str(per_page),
@@ -1042,7 +1042,22 @@ def admin_listing_action(user, data, dry_run=False):
     elif action == "reject":
         if deleted or status != "pending":
             raise ValueError("فقط آگهی در انتظار بررسی قابل رد است.")
-        patch, filters = {"deleted_at": now_iso()}, {"id": f"eq.{listing_id}", "status": "eq.pending", "deleted_at": "is.null"}
+        reason_code = clean(data.get("rejection_reason_code"), 40)
+        reason_label = clean(data.get("rejection_reason_label"), 180)
+        reason_text = clean(data.get("rejection_reason_text"), 500)
+        if not reason_code or not reason_label:
+            raise ValueError("انتخاب دلیل رد آگهی الزامی است.")
+        if reason_code == "other" and not reason_text:
+            raise ValueError("برای گزینه سایر موارد، توضیح مدیر الزامی است.")
+        rejected_at = now_iso()
+        patch = {
+            "status": "rejected",
+            "rejection_reason_code": reason_code,
+            "rejection_reason_label": reason_label,
+            "rejection_reason_text": reason_text or None,
+            "rejected_at": rejected_at,
+        }
+        filters = {"id": f"eq.{listing_id}", "status": "eq.pending", "deleted_at": "is.null"}
     elif action == "sold":
         if deleted or status != "published":
             raise ValueError("فقط آگهی منتشرشده را می‌توان فروش‌رفته کرد.")
@@ -1060,7 +1075,8 @@ def admin_listing_action(user, data, dry_run=False):
     if dry_run:
         return {"ok": True, "preview": True, "message": "اعتبارسنجی عملیات مدیریتی آگهی انجام شد؛ تغییری ذخیره نشد."}
     row = update_listing_status(listing_id, patch, filters)
-    return {"ok": True, "listing": row, "message": "وضعیت آگهی به‌روزرسانی شد."}
+    message = "آگهی رد شد و دلیل آن برای فروشنده ثبت شد." if action == "reject" else "وضعیت آگهی به‌روزرسانی شد."
+    return {"ok": True, "listing": row, "message": message}
 
 
 def owner_listing_action(user, data, dry_run=False):
