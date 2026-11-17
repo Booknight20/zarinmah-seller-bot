@@ -1203,12 +1203,18 @@ def delete_storage(bucket, path):
 
 
 
+def normalize_banner_titles(rows):
+    for row in rows or []:
+        if str(row.get("title") or "").strip() in ("بنر زرین ماه", "بنر زرین‌ماه"):
+            row["title"] = ""
+    return rows or []
+
 def get_public_banners():
     rows = sb_request("GET", "/rest/v1/zarinmah_banners", params={
         "select": "id,title,image_url,target_url,sort_order,is_active",
         "is_active": "eq.true", "order": "sort_order.asc,created_at.desc",
     }) or []
-    return {"ok": True, "banners": rows}
+    return {"ok": True, "banners": normalize_banner_titles(rows)}
 
 def get_admin_banners(user):
     require_admin(user)
@@ -1216,7 +1222,7 @@ def get_admin_banners(user):
         "select": "id,title,image_url,storage_path,target_url,sort_order,is_active,created_at",
         "order": "sort_order.asc,created_at.desc",
     }) or []
-    return {"ok": True, "banners": rows}
+    return {"ok": True, "banners": normalize_banner_titles(rows)}
 
 def save_admin_banner(user, fields, uploads):
     require_admin(user)
