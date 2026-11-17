@@ -1234,7 +1234,7 @@ def save_admin_banner(user, fields, uploads):
         if not existing:
             raise ValueError("بنر موردنظر پیدا نشد.")
     old = existing[0] if existing else {}
-    title = title or old.get("title") or "بنر زرین ماه"
+    title = title or ""
     upload = uploads.get("banner_image")
     image_url = old.get("image_url", "")
     storage_path = old.get("storage_path", "")
