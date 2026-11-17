@@ -413,7 +413,7 @@ def get_account_data(user, query=None):
         "offset": str((listings_page - 1) * listings_per_page),
     }
     request_params = {
-        "select": "id,listing_id,buyer_name,buyer_mobile,message,status,created_at,updated_at,buyer_user_id,seller_approved_at,expires_at,paid_at",
+        "select": "id,listing_id,buyer_name,buyer_mobile,message,status,created_at,updated_at,buyer_user_id,seller_approved_at,expires_at,paid_at,rejection_reason_code,rejection_reason_label,rejection_reason_text",
         "order": "created_at.desc",
         "limit": str(requests_per_page),
         "offset": str((requests_page - 1) * requests_per_page),
@@ -1110,12 +1110,21 @@ def seller_purchase_action(user, data, dry_run=False):
     if dry_run:
         return {"ok": True, "preview": True, "message": "اعتبارسنجی درخواست انجام شد؛ تغییری ذخیره نشد."}
     now = datetime.now(timezone.utc)
+    reason_code = clean(data.get("rejection_reason_code"), 40) if action == "reject" else ""
+    reason_label = clean(data.get("rejection_reason_label"), 180) if action == "reject" else ""
+    reason_text = clean(data.get("rejection_reason_text"), 500) if action == "reject" else ""
     patch = {
         "status": "approved" if action == "approve" else "rejected",
         "updated_at": now.isoformat(),
         "seller_approved_at": now.isoformat() if action == "approve" else None,
         "expires_at": (now + timedelta(hours=6)).isoformat() if action == "approve" else None,
     }
+    if action == "reject":
+        patch.update({
+            "rejection_reason_code": reason_code or None,
+            "rejection_reason_label": reason_label or None,
+            "rejection_reason_text": reason_text or None,
+        })
     rows = sb_request(
         "PATCH", "/rest/v1/purchase_requests",
         params={"id": f"eq.{request_id}", "status": "eq.pending"},
