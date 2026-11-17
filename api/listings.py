@@ -1202,6 +1202,74 @@ def delete_storage(bucket, path):
         print("STORAGE CLEANUP FAILED:", str(exc)[:200])
 
 
+
+def get_public_banners():
+    rows = sb_request("GET", "/rest/v1/zarinmah_banners", params={
+        "select": "id,title,image_url,target_url,sort_order,is_active",
+        "is_active": "eq.true", "order": "sort_order.asc,created_at.desc",
+    }) or []
+    return {"ok": True, "banners": rows}
+
+def get_admin_banners(user):
+    require_admin(user)
+    rows = sb_request("GET", "/rest/v1/zarinmah_banners", params={
+        "select": "id,title,image_url,storage_path,target_url,sort_order,is_active,created_at",
+        "order": "sort_order.asc,created_at.desc",
+    }) or []
+    return {"ok": True, "banners": rows}
+
+def save_admin_banner(user, fields, uploads):
+    require_admin(user)
+    banner_id = clean(fields.get("banner_id"), 40)
+    title = clean(fields.get("title"), 120)
+    target_url = clean(fields.get("target_url"), 500)
+    if not title:
+        raise ValueError("عنوان بنر الزامی است.")
+    try:
+        sort_order = max(0, min(9999, int(fields.get("sort_order") or 0)))
+    except (TypeError, ValueError):
+        raise ValueError("ترتیب نمایش معتبر نیست.")
+    is_active = str(fields.get("is_active", "true")).lower() in ("1", "true", "yes", "on")
+    existing = []
+    if banner_id:
+        existing = sb_request("GET", "/rest/v1/zarinmah_banners", params={"id": "eq." + banner_id, "select": "id,image_url,storage_path", "limit": "1"}) or []
+        if not existing:
+            raise ValueError("بنر موردنظر پیدا نشد.")
+    old = existing[0] if existing else {}
+    upload = uploads.get("banner_image")
+    image_url = old.get("image_url", "")
+    storage_path = old.get("storage_path", "")
+    if upload and upload.get("data"):
+        upload = check_file(upload, {"image/jpeg", "image/png", "image/webp"}, "تصویر بنر", max_size=2 * 1024 * 1024)
+        if not sniff_photo(upload["data"]):
+            raise ValueError("محتوای تصویر بنر معتبر نیست.")
+        ext = {"image/jpeg": "jpg", "image/png": "png", "image/webp": "webp"}[upload["content_type"]]
+        storage_path = "banners/" + uuid.uuid4().hex + "." + ext
+        image_url = upload_storage("listing-images", storage_path, upload["data"], upload["content_type"])
+    if not image_url:
+        raise ValueError("برای بنر جدید، انتخاب تصویر الزامی است.")
+    payload = {"title": title, "image_url": image_url, "storage_path": storage_path, "target_url": target_url or None, "sort_order": sort_order, "is_active": is_active, "updated_at": now_iso()}
+    if banner_id:
+        rows = sb_request("PATCH", "/rest/v1/zarinmah_banners", params={"id": "eq." + banner_id}, payload=payload, prefer="return=representation") or []
+    else:
+        payload["created_at"] = now_iso()
+        rows = sb_request("POST", "/rest/v1/zarinmah_banners", payload=payload, prefer="return=representation") or []
+    if upload and old.get("storage_path") and old.get("storage_path") != storage_path:
+        delete_storage("listing-images", old["storage_path"])
+    return {"ok": True, "banner": rows[0] if rows else payload, "message": "بنر با موفقیت ذخیره شد."}
+
+def delete_admin_banner(user, fields):
+    require_admin(user)
+    banner_id = clean(fields.get("banner_id"), 40)
+    if not banner_id:
+        raise ValueError("شناسه بنر معتبر نیست.")
+    rows = sb_request("GET", "/rest/v1/zarinmah_banners", params={"id": "eq." + banner_id, "select": "id,storage_path", "limit": "1"}) or []
+    if not rows:
+        raise ValueError("بنر موردنظر پیدا نشد.")
+    sb_request("DELETE", "/rest/v1/zarinmah_banners", params={"id": "eq." + banner_id})
+    delete_storage("listing-images", rows[0].get("storage_path"))
+    return {"ok": True, "message": "بنر حذف شد."}
+
 def parse_body(handler):
     raw_length = handler.headers.get("Content-Length", "")
     if not raw_length.isdigit():
@@ -2018,6 +2086,13 @@ class handler(BaseHTTPRequestHandler):
         try:
             query = parse_qs(self.path.split("?", 1)[1]) if "?" in self.path else {}
             action = query.get("action", [""])[0]
+            if action == "banners":
+                respond(self, 200, get_public_banners())
+                return
+            if action == "admin_banners":
+                user = authenticate_user(self)
+                respond(self, 200, get_admin_banners(user))
+                return
             if action == "payment_callback":
                 payment_callback(self, query)
                 return
@@ -2092,6 +2167,12 @@ class handler(BaseHTTPRequestHandler):
                 respond(self, 202, record_site_visit(fields))
                 return
             user = authenticate_user(self)
+            if fields.get("action") == "admin_banner_save":
+                respond(self, 200, save_admin_banner(user, fields, uploads))
+                return
+            if fields.get("action") == "admin_banner_delete":
+                respond(self, 200, delete_admin_banner(user, fields))
+                return
             if fields.get("action") == "mark_notification_read":
                 respond(self, 200, mark_user_notification_read(user, fields))
                 return
