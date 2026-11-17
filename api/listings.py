@@ -616,10 +616,13 @@ def get_user_notifications(user):
             prefer="resolution=ignore-duplicates,return=minimal",
         )
 
+    # Only unread notifications belong in the user's notification inbox.
+    # Read records remain stored for audit/history but are no longer shown.
     notifications = sb_request(
         "GET", "/rest/v1/user_notifications",
         params={
             "recipient_user_id": f"eq.{user_id}",
+            "read_at": "is.null",
             "select": "id,notification_type,title,message,request_id,created_at,read_at",
             "order": "created_at.desc",
             "limit": "30",
