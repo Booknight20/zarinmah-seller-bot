@@ -1223,8 +1223,6 @@ def save_admin_banner(user, fields, uploads):
     banner_id = clean(fields.get("banner_id"), 40)
     title = clean(fields.get("title"), 120)
     target_url = clean(fields.get("target_url"), 500)
-    if not title:
-        raise ValueError("عنوان بنر الزامی است.")
     try:
         sort_order = max(0, min(9999, int(fields.get("sort_order") or 0)))
     except (TypeError, ValueError):
@@ -1236,6 +1234,7 @@ def save_admin_banner(user, fields, uploads):
         if not existing:
             raise ValueError("بنر موردنظر پیدا نشد.")
     old = existing[0] if existing else {}
+    title = title or old.get("title") or "بنر زرین ماه"
     upload = uploads.get("banner_image")
     image_url = old.get("image_url", "")
     storage_path = old.get("storage_path", "")
