@@ -474,6 +474,156 @@ def delete_storage(bucket, path):
         print("STORAGE CLEANUP FAILED:", str(exc)[:200])
 
 
+def normalize_banner_titles(rows):
+    for row in rows or []:
+        if str(row.get("title") or "").strip() in ("بنر زرین ماه", "بنر زرین‌ماه"):
+            row["title"] = ""
+    return rows or []
+
+DEFAULT_SITE_SLOGANS = [
+    {"first": "درخشش طلا،", "second": "با خیال آسوده"},
+    {"first": "زیبایی ماندگار،", "second": "برای انتخابی هوشمندانه"},
+    {"first": "خرید و فروش طلا،", "second": "شفاف و ساده"},
+    {"first": "هر انتخابی،", "second": "به درخشش زرین ماه"},
+    {"first": "طلای دلخواهت،", "second": "با آگاهی انتخاب کن"},
+]
+DEFAULT_SITE_SLOGAN_SETTINGS = {
+    "slogans": DEFAULT_SITE_SLOGANS,
+    "topline": "زرین ماه؛ انتخابی درخشان برای خرید و فروش طلا",
+    "duration": 5,
+    "mode": "rotate",
+}
+
+def get_site_slogan_settings():
+    rows = sb_request("GET", "/rest/v1/zarinmah_site_settings", params={
+        "setting_key": "eq.homepage_slogans",
+        "select": "setting_value",
+        "limit": "1",
+    }) or []
+    if not rows:
+        return DEFAULT_SITE_SLOGAN_SETTINGS
+    value = rows[0].get("setting_value") or {}
+    if not isinstance(value, dict):
+        return DEFAULT_SITE_SLOGAN_SETTINGS
+    result = dict(DEFAULT_SITE_SLOGAN_SETTINGS)
+    result.update(value)
+    if not isinstance(result.get("slogans"), list) or not result["slogans"]:
+        result["slogans"] = DEFAULT_SITE_SLOGAN_SETTINGS["slogans"]
+    return result
+
+def get_admin_site_slogans(user):
+    require_admin(user)
+    return {"ok": True, "settings": get_site_slogan_settings()}
+
+def save_admin_site_slogans(user, fields):
+    require_admin(user)
+    try:
+        slogans = json.loads(fields.get("slogans_json") or "[]")
+    except (TypeError, ValueError):
+        raise ValueError("ساختار شعارها معتبر نیست.")
+    if not isinstance(slogans, list) or not 1 <= len(slogans) <= 20:
+        raise ValueError("تعداد شعارها باید بین ۱ تا ۲۰ مورد باشد.")
+    normalized = []
+    for item in slogans:
+        if not isinstance(item, dict):
+            raise ValueError("ساختار یکی از شعارها معتبر نیست.")
+        first = clean(item.get("first"), 70)
+        second = clean(item.get("second"), 70)
+        if not first or not second:
+            raise ValueError("هر شعار باید شامل دو خط کامل باشد.")
+        normalized.append({"first": first, "second": second})
+    topline = clean(fields.get("topline"), 110)
+    if not topline:
+        raise ValueError("متن نوار بالایی نمی‌تواند خالی باشد.")
+    try:
+        duration = int(fields.get("duration") or 5)
+    except (TypeError, ValueError):
+        raise ValueError("مدت نمایش شعار معتبر نیست.")
+    if duration not in (4, 5, 6, 8, 10):
+        raise ValueError("مدت نمایش باید یکی از گزینه‌های موجود باشد.")
+    mode = clean(fields.get("mode"), 10)
+    if mode not in ("rotate", "fixed", "off"):
+        raise ValueError("حالت نمایش شعار معتبر نیست.")
+    settings = {"slogans": normalized, "topline": topline, "duration": duration, "mode": mode}
+    sb_request(
+        "POST", "/rest/v1/zarinmah_site_settings",
+        params={"on_conflict": "setting_key"},
+        payload={
+            "setting_key": "homepage_slogans",
+            "setting_value": settings,
+            "updated_by": user["id"],
+            "updated_at": now_iso(),
+        },
+        prefer="resolution=merge-duplicates,return=representation",
+    )
+    return {"ok": True, "settings": settings, "message": "تنظیمات شعارها ذخیره شد."}
+
+def get_public_banners():
+    rows = sb_request("GET", "/rest/v1/zarinmah_banners", params={
+        "select": "id,title,image_url,target_url,sort_order,is_active",
+        "is_active": "eq.true", "order": "sort_order.asc,created_at.desc",
+    }) or []
+    return {"ok": True, "banners": normalize_banner_titles(rows)}
+
+def get_admin_banners(user):
+    require_admin(user)
+    rows = sb_request("GET", "/rest/v1/zarinmah_banners", params={
+        "select": "id,title,image_url,storage_path,target_url,sort_order,is_active,created_at",
+        "order": "sort_order.asc,created_at.desc",
+    }) or []
+    return {"ok": True, "banners": normalize_banner_titles(rows)}
+
+def save_admin_banner(user, fields, uploads):
+    require_admin(user)
+    banner_id = clean(fields.get("banner_id"), 40)
+    title = clean(fields.get("title"), 120)
+    target_url = clean(fields.get("target_url"), 500)
+    try:
+        sort_order = max(0, min(9999, int(fields.get("sort_order") or 0)))
+    except (TypeError, ValueError):
+        raise ValueError("ترتیب نمایش معتبر نیست.")
+    is_active = str(fields.get("is_active", "true")).lower() in ("1", "true", "yes", "on")
+    existing = []
+    if banner_id:
+        existing = sb_request("GET", "/rest/v1/zarinmah_banners", params={"id": "eq." + banner_id, "select": "id,image_url,storage_path", "limit": "1"}) or []
+        if not existing:
+            raise ValueError("بنر موردنظر پیدا نشد.")
+    old = existing[0] if existing else {}
+    title = title or ""
+    upload = uploads.get("banner_image")
+    image_url = old.get("image_url", "")
+    storage_path = old.get("storage_path", "")
+    if upload and upload.get("data"):
+        upload = check_file(upload, {"image/jpeg", "image/png", "image/webp"}, "تصویر بنر", max_size=2 * 1024 * 1024)
+        if not sniff_photo(upload["data"]):
+            raise ValueError("محتوای تصویر بنر معتبر نیست.")
+        ext = {"image/jpeg": "jpg", "image/png": "png", "image/webp": "webp"}[upload["content_type"]]
+        storage_path = "banners/" + uuid.uuid4().hex + "." + ext
+        image_url = upload_storage("listing-images", storage_path, upload["data"], upload["content_type"])
+    if not image_url:
+        raise ValueError("برای بنر جدید، انتخاب تصویر الزامی است.")
+    payload = {"title": title, "image_url": image_url, "storage_path": storage_path, "target_url": target_url or None, "sort_order": sort_order, "is_active": is_active, "updated_at": now_iso()}
+    if banner_id:
+        rows = sb_request("PATCH", "/rest/v1/zarinmah_banners", params={"id": "eq." + banner_id}, payload=payload, prefer="return=representation") or []
+    else:
+        payload["created_at"] = now_iso()
+        rows = sb_request("POST", "/rest/v1/zarinmah_banners", payload=payload, prefer="return=representation") or []
+    if upload and old.get("storage_path") and old.get("storage_path") != storage_path:
+        delete_storage("listing-images", old["storage_path"])
+    return {"ok": True, "banner": rows[0] if rows else payload, "message": "بنر با موفقیت ذخیره شد."}
+
+def delete_admin_banner(user, fields):
+    require_admin(user)
+    banner_id = clean(fields.get("banner_id"), 40)
+    if not banner_id:
+        raise ValueError("شناسه بنر معتبر نیست.")
+    rows = sb_request("GET", "/rest/v1/zarinmah_banners", params={"id": "eq." + banner_id, "select": "id,storage_path", "limit": "1"}) or []
+    if not rows:
+        raise ValueError("بنر موردنظر پیدا نشد.")
+    sb_request("DELETE", "/rest/v1/zarinmah_banners", params={"id": "eq." + banner_id})
+    delete_storage("listing-images", rows[0].get("storage_path"))
+    return {"ok": True, "message": "بنر حذف شد."}
+
 def parse_body(handler):
     raw_length = handler.headers.get("Content-Length", "")
     if not raw_length.isdigit():
@@ -515,11 +665,11 @@ def parse_body(handler):
     raise ValueError("نوع درخواست پشتیبانی نمی‌شود.")
 
 
-def check_file(upload, allowed, label):
+def check_file(upload, allowed, label, max_size=MAX_FILE_SIZE):
     if not upload or not upload.get("data"):
         raise ValueError(f"ارسال {label} الزامی است.")
-    if len(upload["data"]) > MAX_FILE_SIZE:
-        raise ValueError(f"حجم {label} نباید بیشتر از ۱٫۵ مگابایت باشد.")
+    if len(upload["data"]) > max_size:
+        raise ValueError(f"حجم {label} از حد مجاز بیشتر است.")
     if upload["content_type"] not in allowed:
         raise ValueError(f"فرمت {label} مجاز نیست.")
     return upload
@@ -891,6 +1041,20 @@ class handler(BaseHTTPRequestHandler):
         try:
             query = parse_qs(self.path.split("?", 1)[1]) if "?" in self.path else {}
             action = query.get("action", [""])[0]
+            if action == "site_slogans":
+                respond(self, 200, {"ok": True, "settings": get_site_slogan_settings()})
+                return
+            if action == "admin_site_slogans":
+                user = authenticate_user(self)
+                respond(self, 200, get_admin_site_slogans(user))
+                return
+            if action == "banners":
+                respond(self, 200, get_public_banners())
+                return
+            if action == "admin_banners":
+                user = authenticate_user(self)
+                respond(self, 200, get_admin_banners(user))
+                return
             if action == "profile":
                 user = authenticate_user(self)
                 profile = get_user_profile(user)
@@ -930,6 +1094,15 @@ class handler(BaseHTTPRequestHandler):
         try:
             user = authenticate_user(self)
             fields, uploads = parse_body(self)
+            if fields.get("action") == "admin_site_slogans_save":
+                respond(self, 200, save_admin_site_slogans(user, fields))
+                return
+            if fields.get("action") == "admin_banner_save":
+                respond(self, 200, save_admin_banner(user, fields, uploads))
+                return
+            if fields.get("action") == "admin_banner_delete":
+                respond(self, 200, delete_admin_banner(user, fields))
+                return
             if fields.get("action") == "complete_profile":
                 if PREVIEW_DRY_RUN:
                     respond(self, 200, {
