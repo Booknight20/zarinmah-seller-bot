@@ -13,14 +13,22 @@ MAX_BODY = 128 * 1024
 WRITE_TOKEN = os.environ.get("MARKET_HISTORY_WRITE_TOKEN", "")
 
 
-def sb_request(method, path, *, params=None, payload=None, prefer=None):
-    if not SUPABASE_URL or not SUPABASE_SERVICE_ROLE_KEY:
-        raise RuntimeError("Supabase server credentials are not configured.")
-    headers = {
-        "apikey": SUPABASE_SERVICE_ROLE_KEY,
-        "Authorization": f"Bearer {SUPABASE_SERVICE_ROLE_KEY}",
-        "Accept": "application/json",
-    }
+def sb_request(method, path, *, params=None, payload=None, prefer=None, public=False):
+    if not SUPABASE_URL:
+        raise RuntimeError("Supabase URL is not configured.")
+    if public and os.environ.get("SUPABASE_PUBLISHABLE_KEY", "").strip():
+        headers = {
+            "apikey": os.environ["SUPABASE_PUBLISHABLE_KEY"].strip(),
+            "Accept": "application/json",
+        }
+    else:
+        if not SUPABASE_SERVICE_ROLE_KEY:
+            raise RuntimeError("Supabase server credentials are not configured.")
+        headers = {
+            "apikey": SUPABASE_SERVICE_ROLE_KEY,
+            "Authorization": f"Bearer {SUPABASE_SERVICE_ROLE_KEY}",
+            "Accept": "application/json",
+        }
     if payload is not None:
         headers["Content-Type"] = "application/json"
     if prefer:
@@ -64,6 +72,7 @@ class handler(BaseHTTPRequestHandler):
                 "GET",
                 TABLE,
                 params={"id": "eq.daily", "select": "state,updated_at", "limit": "1"},
+                public=True,
             ) or []
             if not rows:
                 respond(self, 200, {"ok": True, "found": False, "state": None})
