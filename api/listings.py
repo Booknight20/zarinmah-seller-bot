@@ -16,6 +16,7 @@ TELEGRAM_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
 TG_API = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}" if TELEGRAM_TOKEN else ""
 SUPABASE_URL = os.environ.get("SUPABASE_URL", "").rstrip("/")
 SUPABASE_SERVICE_ROLE_KEY = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "")
+STAGING_SUPABASE_URL = "https://qijahxokldkaqmjinfvy.supabase.co"
 SUPABASE_TIMEOUT = 30
 PREVIEW_DRY_RUN = os.environ.get("ZARINMAH_PREVIEW_DRY_RUN", "").strip().lower() == "true"
 MAX_BODY_SIZE = 4 * 1024 * 1024
@@ -139,9 +140,14 @@ def authenticate_user(handler):
         raise AuthError("پاسخ احراز هویت معتبر نیست.")
     user_id = clean(user.get("id"), 80)
     phone = clean(user.get("phone"), 30)
-    if not user_id or not valid_phone(phone):
-        raise AuthError("حساب کاربری باید شماره موبایل تأییدشده داشته باشد.")
-    return {"id": user_id, "phone": phone}
+    email = clean(user.get("email"), 254).lower()
+    if not user_id:
+        raise AuthError("شناسه حساب کاربری معتبر نیست.")
+    if valid_phone(phone):
+        return {"id": user_id, "phone": phone, "email": email}
+    if SUPABASE_URL == STAGING_SUPABASE_URL and email:
+        return {"id": user_id, "phone": "", "email": email}
+    raise AuthError("حساب کاربری باید شماره موبایل تأییدشده داشته باشد.")
 
 
 def get_user_profile(user):
@@ -149,7 +155,7 @@ def get_user_profile(user):
         "GET", "/rest/v1/profiles",
         params={
             "id": f"eq.{user['id']}",
-            "select": "id,full_name,mobile,is_active",
+            "select": "id,full_name,mobile,email,username,province,city,address,national_id,is_active",
             "limit": "1",
         },
     ) or []
@@ -165,21 +171,76 @@ def require_complete_profile(user):
     full_name = clean(profile.get("full_name"), 100)
     if not full_name:
         raise ProfileIncompleteError("برای ادامه، ابتدا نام و نام خانوادگی خود را در حساب کاربری تکمیل کنید.")
+    username = clean(profile.get("username"), 24)
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{2,23}", username):
+        raise ProfileIncompleteError("برای ادامه، یک نام کاربری معتبر و یکتا در حساب خود ثبت کنید.")
+    if not clean(profile.get("address"), 500) or len(clean(profile.get("address"), 500)) < 10:
+        raise ProfileIncompleteError("برای ادامه، ابتدا نشانی محل سکونت خود را در حساب کاربری تکمیل کنید.")
+    if not valid_national_id(profile.get("national_id")):
+        raise ProfileIncompleteError("برای ادامه، ابتدا کد ملی معتبر خود را در حساب کاربری ثبت کنید.")
+    if clean(profile.get("province"), 80) not in PROVINCES or not clean(profile.get("city"), 100):
+        raise ProfileIncompleteError("برای ادامه، استان و شهر محل سکونت را در حساب کاربری تکمیل کنید.")
     return profile
+
+
+def valid_national_id(value):
+    value = digits(value)
+    if not re.fullmatch(r"\\d{10}", value) or len(set(value)) == 1:
+        return False
+    checksum = int(value[9])
+    total = sum(int(value[i]) * (10 - i) for i in range(9))
+    remainder = total % 11
+    return checksum == (remainder if remainder < 2 else 11 - remainder)
 
 
 def update_user_profile(user, data):
     full_name = clean(data.get("full_name"), 100)
+    username = clean(data.get("username"), 24).lower()
+    email = clean(data.get("email"), 254).lower()
+    province = clean(data.get("province"), 80)
+    city = clean(data.get("city"), 100)
+    address = clean(data.get("address"), 500)
+    national_id = digits(data.get("national_id"))
+
     if len(full_name.split()) < 2 or len(full_name) < 5:
         raise ValueError("نام و نام خانوادگی کامل را وارد کنید.")
+    if not re.fullmatch(r"[a-z0-9][a-z0-9_.-]{2,23}", username):
+        raise ValueError("نام کاربری باید ۳ تا ۲۴ نویسه و شامل حروف انگلیسی، عدد، نقطه، خط تیره یا زیرخط باشد.")
+    if email and not re.fullmatch(r"[^\\s@]+@[^\\s@]+\\.[^\\s@]+", email):
+        raise ValueError("نشانی ایمیل معتبر وارد کنید یا کادر آن را خالی بگذارید.")
+    if province not in PROVINCES or not city:
+        raise ValueError("استان و شهر محل سکونت را از فهرست انتخاب کنید.")
+    if len(address) < 10:
+        raise ValueError("آدرس کامل محل سکونت را وارد کنید.")
+    if not valid_national_id(national_id):
+        raise ValueError("کد ملی معتبر ۱۰ رقمی وارد کنید.")
+
     existing = get_user_profile(user)
     if existing and existing.get("is_active") is not True:
         raise AuthError("حساب کاربری شما غیرفعال است. برای پیگیری با پشتیبانی تماس بگیرید.")
+    is_staging_email = SUPABASE_URL == STAGING_SUPABASE_URL and not user.get("phone") and bool(user.get("email"))
+    if is_staging_email:
+        mobile = clean(data.get("mobile"), 30)
+        if not valid_phone(mobile):
+            raise ValueError("برای حساب آزمایشی، شماره تماس معتبر وارد کنید.")
+    else:
+        mobile = clean(user.get("phone"), 30)
+    profile_payload = {
+        "full_name": full_name,
+        "username": username,
+        "email": email or None,
+        "mobile": mobile or None,
+        "province": province,
+        "city": city,
+        "address": address,
+        "national_id": national_id,
+        "updated_at": now_iso(),
+    }
     if existing:
         rows = sb_request(
             "PATCH", "/rest/v1/profiles",
             params={"id": f"eq.{user['id']}"},
-            payload={"full_name": full_name, "updated_at": now_iso()},
+            payload=profile_payload,
             prefer="return=representation",
         ) or []
     else:
@@ -187,11 +248,9 @@ def update_user_profile(user, data):
             "POST", "/rest/v1/profiles",
             payload={
                 "id": user["id"],
-                "full_name": full_name,
-                "mobile": user["phone"],
+                **profile_payload,
                 "is_active": True,
                 "created_at": now_iso(),
-                "updated_at": now_iso(),
             },
             prefer="return=representation",
         ) or []
