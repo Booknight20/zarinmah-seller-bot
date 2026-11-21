@@ -69,20 +69,25 @@ def html(value):
     return value.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")
 
 
-def sb_headers(extra=None):
-    if not SUPABASE_URL or not SUPABASE_SERVICE_ROLE_KEY:
-        raise RuntimeError("SUPABASE_URL یا SUPABASE_SERVICE_ROLE_KEY در تنظیمات Vercel وجود ندارد.")
-    result = {
-        "apikey": SUPABASE_SERVICE_ROLE_KEY,
-        "Authorization": f"Bearer {SUPABASE_SERVICE_ROLE_KEY}",
-    }
+def sb_headers(extra=None, public=False):
+    if not SUPABASE_URL:
+        raise RuntimeError("SUPABASE_URL در تنظیمات Vercel وجود ندارد.")
+    if public and SUPABASE_PUBLISHABLE_KEY:
+        result = {"apikey": SUPABASE_PUBLISHABLE_KEY}
+    else:
+        if not SUPABASE_SERVICE_ROLE_KEY:
+            raise RuntimeError("SUPABASE_SERVICE_ROLE_KEY در تنظیمات Vercel وجود ندارد.")
+        result = {
+            "apikey": SUPABASE_SERVICE_ROLE_KEY,
+            "Authorization": f"Bearer {SUPABASE_SERVICE_ROLE_KEY}",
+        }
     if extra:
         result.update(extra)
     return result
 
 
-def sb_request(method, path, *, params=None, payload=None, raw=None, content_type=None, prefer=None):
-    headers = sb_headers()
+def sb_request(method, path, *, params=None, payload=None, raw=None, content_type=None, prefer=None, public=False):
+    headers = sb_headers(public=public)
     if payload is not None:
         headers["Content-Type"] = "application/json"
     if content_type:
@@ -625,7 +630,7 @@ def get_public_banners():
     rows = sb_request("GET", "/rest/v1/zarinmah_banners", params={
         "select": "id,title,image_url,target_url,sort_order,is_active",
         "is_active": "eq.true", "order": "sort_order.asc,created_at.desc",
-    }) or []
+    }, public=True) or []
     return {"ok": True, "banners": normalize_banner_titles(rows)}
 
 def get_admin_banners(user):
@@ -1147,6 +1152,7 @@ class handler(BaseHTTPRequestHandler):
                     "deleted_at": "is.null",
                     "order": "created_at.desc",
                 },
+                public=True,
             ) or []
             listings = [
                 public_listing(row)
