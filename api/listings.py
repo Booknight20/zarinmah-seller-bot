@@ -185,7 +185,7 @@ def require_complete_profile(user):
 
 def valid_national_id(value):
     value = digits(value)
-    if not re.fullmatch(r"\\d{10}", value) or len(set(value)) == 1:
+    if not re.fullmatch(r"\d{10}", value) or len(set(value)) == 1:
         return False
     checksum = int(value[9])
     total = sum(int(value[i]) * (10 - i) for i in range(9))
@@ -206,7 +206,7 @@ def update_user_profile(user, data):
         raise ValueError("نام و نام خانوادگی کامل را وارد کنید.")
     if not re.fullmatch(r"[a-z0-9][a-z0-9_.-]{2,23}", username):
         raise ValueError("نام کاربری باید ۳ تا ۲۴ نویسه و شامل حروف انگلیسی، عدد، نقطه، خط تیره یا زیرخط باشد.")
-    if email and not re.fullmatch(r"[^\\s@]+@[^\\s@]+\\.[^\\s@]+", email):
+    if email and not re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", email):
         raise ValueError("نشانی ایمیل معتبر وارد کنید یا کادر آن را خالی بگذارید.")
     if province not in PROVINCES or not city:
         raise ValueError("استان و شهر محل سکونت را از فهرست انتخاب کنید.")
