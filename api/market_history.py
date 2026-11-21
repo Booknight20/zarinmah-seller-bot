@@ -1,5 +1,6 @@
 import json
 import os
+import hmac
 from http.server import BaseHTTPRequestHandler
 
 import requests
@@ -9,6 +10,7 @@ SUPABASE_SERVICE_ROLE_KEY = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "")
 TABLE = "market_history_state"
 TIMEOUT = 15
 MAX_BODY = 128 * 1024
+WRITE_TOKEN = os.environ.get("MARKET_HISTORY_WRITE_TOKEN", "")
 
 
 def sb_request(method, path, *, params=None, payload=None, prefer=None):
@@ -77,6 +79,10 @@ class handler(BaseHTTPRequestHandler):
             respond(self, 500, {"ok": False, "error": "خواندن تاریخچه بازار از پایگاه داده ناموفق بود."})
 
     def do_POST(self):
+        supplied_token = self.headers.get("X-Market-History-Token", "")
+        if not WRITE_TOKEN or not hmac.compare_digest(supplied_token, WRITE_TOKEN):
+            respond(self, 401, {"ok": False, "error": "دسترسی نوشتن مجاز نیست."})
+            return
         try:
             length = int(self.headers.get("Content-Length", "0"))
             if length <= 0 or length > MAX_BODY:
