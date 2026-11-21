@@ -16,6 +16,7 @@ TELEGRAM_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
 TG_API = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}" if TELEGRAM_TOKEN else ""
 SUPABASE_URL = os.environ.get("SUPABASE_URL", "").rstrip("/")
 SUPABASE_SERVICE_ROLE_KEY = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "")
+SUPABASE_PUBLISHABLE_KEY = os.environ.get("SUPABASE_PUBLISHABLE_KEY", "").strip()
 STAGING_SUPABASE_URL = "https://qijahxokldkaqmjinfvy.supabase.co"
 SUPABASE_TIMEOUT = 30
 PREVIEW_DRY_RUN = os.environ.get("ZARINMAH_PREVIEW_DRY_RUN", "").strip().lower() == "true"
@@ -121,13 +122,14 @@ def authenticate_user(handler):
     authorization = clean(handler.headers.get("Authorization", ""), 2048)
     if not authorization.startswith("Bearer "):
         raise AuthError("برای ادامه ابتدا وارد حساب کاربری شوید.")
-    if not SUPABASE_URL or not SUPABASE_SERVICE_ROLE_KEY:
-        raise RuntimeError("تنظیمات اتصال به Supabase کامل نیست.")
+    auth_api_key = SUPABASE_PUBLISHABLE_KEY or SUPABASE_SERVICE_ROLE_KEY
+    if not SUPABASE_URL or not auth_api_key:
+        raise RuntimeError("تنظیمات احراز هویت Supabase کامل نیست.")
     try:
         response = requests.get(
             SUPABASE_URL + "/auth/v1/user",
             headers={
-                "apikey": SUPABASE_SERVICE_ROLE_KEY,
+                "apikey": auth_api_key,
                 "Authorization": authorization,
             },
             timeout=15,
@@ -1120,6 +1122,13 @@ class handler(BaseHTTPRequestHandler):
                 return
             if action == "profile":
                 user = authenticate_user(self)
+                if PREVIEW_DRY_RUN:
+                    respond(self, 200, {
+                        "ok": True, "profile": None, "role": "user",
+                        "preview": True,
+                        "message": "در حالت آزمایشی، خواندن و ذخیره اطلاعات پروفایل غیرفعال است.",
+                    })
+                    return
                 profile = get_user_profile(user)
                 role = get_user_role(user) if profile else "user"
                 respond(self, 200, {"ok": True, "profile": profile, "role": role})
