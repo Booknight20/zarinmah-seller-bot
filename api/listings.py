@@ -266,8 +266,6 @@ def update_user_profile(user, data, access_token=None):
             payload={
                 "id": user["id"],
                 **profile_payload,
-                "is_active": True,
-                "created_at": now_iso(),
             },
             prefer="return=representation",
             user_token=access_token,
