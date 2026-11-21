@@ -47,7 +47,7 @@ def respond(handler, status, payload):
     handler.send_header("Cache-Control", "no-store")
     handler.send_header("Access-Control-Allow-Origin", "*")
     handler.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-    handler.send_header("Access-Control-Allow-Headers", "Content-Type, Accept")
+    handler.send_header("Access-Control-Allow-Headers", "Content-Type, Accept, X-Market-History-Token, x-vercel-protection-bypass")
     handler.send_header("Content-Length", str(len(body)))
     handler.end_headers()
     if status != 204:
