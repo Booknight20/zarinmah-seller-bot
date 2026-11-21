@@ -669,7 +669,9 @@ def check_file(upload, allowed, label, max_size=MAX_FILE_SIZE):
     if not upload or not upload.get("data"):
         raise ValueError(f"ارسال {label} الزامی است.")
     if len(upload["data"]) > max_size:
-        raise ValueError(f"حجم {label} از حد مجاز بیشتر است.")
+        if max_size == MAX_FILE_SIZE:
+            raise ValueError(f"حجم {label} نباید بیشتر از ۱٫۵ مگابایت باشد.")
+        raise ValueError(f"حجم {label} نباید بیشتر از ۲ مگابایت باشد.")
     if upload["content_type"] not in allowed:
         raise ValueError(f"فرمت {label} مجاز نیست.")
     return upload
