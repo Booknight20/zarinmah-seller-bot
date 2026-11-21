@@ -69,10 +69,15 @@ def html(value):
     return value.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")
 
 
-def sb_headers(extra=None, public=False):
+def sb_headers(extra=None, public=False, user_token=None):
     if not SUPABASE_URL:
         raise RuntimeError("SUPABASE_URL در تنظیمات Vercel وجود ندارد.")
-    if public and SUPABASE_PUBLISHABLE_KEY:
+    if user_token and SUPABASE_PUBLISHABLE_KEY:
+        result = {
+            "apikey": SUPABASE_PUBLISHABLE_KEY,
+            "Authorization": f"Bearer {user_token}",
+        }
+    elif public and SUPABASE_PUBLISHABLE_KEY:
         result = {"apikey": SUPABASE_PUBLISHABLE_KEY}
     else:
         if not SUPABASE_SERVICE_ROLE_KEY:
@@ -86,8 +91,8 @@ def sb_headers(extra=None, public=False):
     return result
 
 
-def sb_request(method, path, *, params=None, payload=None, raw=None, content_type=None, prefer=None, public=False):
-    headers = sb_headers(public=public)
+def sb_request(method, path, *, params=None, payload=None, raw=None, content_type=None, prefer=None, public=False, user_token=None):
+    headers = sb_headers(public=public, user_token=user_token)
     if payload is not None:
         headers["Content-Type"] = "application/json"
     if content_type:
@@ -152,14 +157,15 @@ def authenticate_user(handler):
     email = clean(user.get("email"), 254).lower()
     if not user_id:
         raise AuthError("شناسه حساب کاربری معتبر نیست.")
+    access_token = authorization[7:].strip()
     if valid_phone(phone):
-        return {"id": user_id, "phone": phone, "email": email}
+        return {"id": user_id, "phone": phone, "email": email, "access_token": access_token}
     if SUPABASE_URL == STAGING_SUPABASE_URL and email:
-        return {"id": user_id, "phone": "", "email": email}
+        return {"id": user_id, "phone": "", "email": email, "access_token": access_token}
     raise AuthError("حساب کاربری باید شماره موبایل تأییدشده داشته باشد.")
 
 
-def get_user_profile(user):
+def get_user_profile(user, access_token=None):
     rows = sb_request(
         "GET", "/rest/v1/profiles",
         params={
@@ -167,6 +173,7 @@ def get_user_profile(user):
             "select": "id,full_name,mobile,email,username,province,city,address,national_id,is_active",
             "limit": "1",
         },
+        user_token=access_token,
     ) or []
     return rows[0] if rows else None
 
@@ -202,7 +209,7 @@ def valid_national_id(value):
     return checksum == (remainder if remainder < 2 else 11 - remainder)
 
 
-def update_user_profile(user, data):
+def update_user_profile(user, data, access_token=None):
     full_name = clean(data.get("full_name"), 100)
     username = clean(data.get("username"), 24).lower()
     email = clean(data.get("email"), 254).lower()
@@ -224,7 +231,7 @@ def update_user_profile(user, data):
     if not valid_national_id(national_id):
         raise ValueError("کد ملی معتبر ۱۰ رقمی وارد کنید.")
 
-    existing = get_user_profile(user)
+    existing = get_user_profile(user, access_token=access_token)
     if existing and existing.get("is_active") is not True:
         raise AuthError("حساب کاربری شما غیرفعال است. برای پیگیری با پشتیبانی تماس بگیرید.")
     is_staging_email = SUPABASE_URL == STAGING_SUPABASE_URL and not user.get("phone") and bool(user.get("email"))
@@ -251,6 +258,7 @@ def update_user_profile(user, data):
             params={"id": f"eq.{user['id']}"},
             payload=profile_payload,
             prefer="return=representation",
+            user_token=access_token,
         ) or []
     else:
         rows = sb_request(
@@ -262,28 +270,20 @@ def update_user_profile(user, data):
                 "created_at": now_iso(),
             },
             prefer="return=representation",
+            user_token=access_token,
         ) or []
     if not rows:
         raise ProfileIncompleteError("ذخیره پروفایل انجام نشد. کمی بعد دوباره تلاش کنید.")
-    role_rows = sb_request(
-        "GET", "/rest/v1/user_roles",
-        params={"user_id": f"eq.{user['id']}", "select": "role", "limit": "1"},
-    ) or []
-    if not role_rows:
-        sb_request(
-            "POST", "/rest/v1/user_roles",
-            payload={"user_id": user["id"], "role": "user"},
-            prefer="resolution=ignore-duplicates,return=minimal",
-        )
     return rows[0]
 
 
 
 
-def get_user_role(user):
+def get_user_role(user, access_token=None):
     rows = sb_request(
         "GET", "/rest/v1/user_roles",
         params={"user_id": f"eq.{user['id']}", "select": "role", "limit": "1"},
+        user_token=access_token,
     ) or []
     return rows[0].get("role", "user") if rows else "user"
 
@@ -1127,15 +1127,8 @@ class handler(BaseHTTPRequestHandler):
                 return
             if action == "profile":
                 user = authenticate_user(self)
-                if PREVIEW_DRY_RUN:
-                    respond(self, 200, {
-                        "ok": True, "profile": None, "role": "user",
-                        "preview": True,
-                        "message": "در حالت آزمایشی، خواندن و ذخیره اطلاعات پروفایل غیرفعال است.",
-                    })
-                    return
-                profile = get_user_profile(user)
-                role = get_user_role(user) if profile else "user"
+                profile = get_user_profile(user, access_token=user.get("access_token"))
+                role = get_user_role(user, access_token=user.get("access_token")) if profile else "user"
                 respond(self, 200, {"ok": True, "profile": profile, "role": role})
                 return
             if action == "account":
@@ -1182,13 +1175,7 @@ class handler(BaseHTTPRequestHandler):
                 respond(self, 200, delete_admin_banner(user, fields))
                 return
             if fields.get("action") == "complete_profile":
-                if PREVIEW_DRY_RUN:
-                    respond(self, 200, {
-                        "ok": True, "preview": True,
-                        "message": "اعتبارسنجی فرم تکمیل پروفایل در حالت آزمایشی انجام شد؛ اطلاعات ذخیره نشد.",
-                    })
-                    return
-                profile = update_user_profile(user, fields)
+                profile = update_user_profile(user, fields, access_token=user.get("access_token"))
                 respond(self, 200, {"ok": True, "profile": profile, "message": "پروفایل شما با موفقیت تکمیل شد."})
                 return
             if fields.get("action") in ("admin_listing_action", "owner_listing_action", "admin_purchase_action"):
