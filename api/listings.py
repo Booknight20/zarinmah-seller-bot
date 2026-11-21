@@ -98,6 +98,8 @@ def sb_request(method, path, *, params=None, payload=None, raw=None, content_typ
             detail = body.get("message") or body.get("details") or body.get("hint") or str(body)
         except Exception:
             detail = response.text[:400]
+        if response.status_code == 409 and "profiles_username_lower_uidx" in response.text:
+            raise ValueError("این نام کاربری قبلاً انتخاب شده است؛ نام دیگری وارد کنید.")
         raise RuntimeError(f"Supabase {response.status_code}: {detail}")
     if response.status_code == 204 or not response.content:
         return None
