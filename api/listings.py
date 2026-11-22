@@ -178,8 +178,8 @@ def get_user_profile(user, access_token=None):
     return rows[0] if rows else None
 
 
-def require_complete_profile(user):
-    profile = get_user_profile(user)
+def require_complete_profile(user, access_token=None):
+    profile = get_user_profile(user, access_token=access_token)
     if not profile:
         raise ProfileIncompleteError("پروفایل حساب شما هنوز ایجاد نشده است. صفحه را تازه‌سازی کنید یا با پشتیبانی تماس بگیرید.")
     if profile.get("is_active") is not True:
@@ -294,8 +294,8 @@ def require_admin(user):
 
 
 
-def sb_request_counted(path, params):
-    headers = sb_headers({"Prefer": "count=exact"})
+def sb_request_counted(path, params, access_token=None):
+    headers = sb_headers({"Prefer": "count=exact"}, user_token=access_token)
     response = requests.get(
         SUPABASE_URL + path, headers=headers, params=params, timeout=SUPABASE_TIMEOUT
     )
@@ -332,8 +332,9 @@ def account_search(value):
 
 def get_account_data(user, query=None):
     query = query or {}
-    profile = require_complete_profile(user)
-    role = get_user_role(user)
+    access_token = user.get("access_token")
+    profile = require_complete_profile(user, access_token=access_token)
+    role = get_user_role(user, access_token=access_token)
     admin = role == "admin"
     per_page = 20
     listings_page = account_page((query.get("listings_page") or ["1"])[0])
@@ -385,8 +386,8 @@ def get_account_data(user, query=None):
             f"(buyer_name.ilike.{term},buyer_mobile.ilike.{term},message.ilike.{term})"
         )
 
-    listings, listings_total = sb_request_counted("/rest/v1/listings", listing_params)
-    requests_rows, requests_total = sb_request_counted("/rest/v1/purchase_requests", request_params)
+    listings, listings_total = sb_request_counted("/rest/v1/listings", listing_params, access_token=access_token)
+    requests_rows, requests_total = sb_request_counted("/rest/v1/purchase_requests", request_params, access_token=access_token)
 
     titles = {
         str(item.get("id")): item.get("title") or item.get("product_type") or "آگهی"
