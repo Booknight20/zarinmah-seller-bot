@@ -287,8 +287,9 @@ def get_user_role(user, access_token=None):
 
 
 def require_admin(user):
-    profile = require_complete_profile(user)
-    if get_user_role(user) != "admin":
+    access_token = user.get("access_token")
+    profile = require_complete_profile(user, access_token=access_token)
+    if get_user_role(user, access_token=access_token) != "admin":
         raise AuthError("این عملیات فقط برای مدیر سامانه مجاز است.")
     return profile
 
@@ -425,6 +426,39 @@ def get_account_data(user, query=None):
             },
         },
     }
+
+
+def record_site_visit(data):
+    visitor_id = clean(data.get("visitor_id"), 64)
+    session_id = clean(data.get("session_id"), 64)
+    try:
+        visitor_id = str(uuid.UUID(visitor_id))
+        session_id = str(uuid.UUID(session_id))
+    except (ValueError, TypeError, AttributeError):
+        raise ValueError("شناسه ناشناس بازدید معتبر نیست.")
+    path = clean(data.get("path") or "/", 200).split("?", 1)[0].split("#", 1)[0]
+    if not re.fullmatch(r"/[A-Za-z0-9/_-]{0,180}", path) or path.startswith("//"):
+        path = "/"
+    sb_request(
+        "POST", "/rest/v1/site_visit_events",
+        payload={"visitor_id": visitor_id, "session_id": session_id, "path": path},
+        prefer="resolution=ignore-duplicates,return=minimal",
+        public=True,
+    )
+    return {"ok": True}
+
+
+def get_admin_dashboard_stats(user):
+    require_admin(user)
+    result = sb_request(
+        "POST", "/rest/v1/rpc/zarinmah_admin_dashboard_stats",
+        payload={},
+        user_token=user.get("access_token"),
+    )
+    if not isinstance(result, dict):
+        raise RuntimeError("گزارش مدیریتی از پایگاه داده دریافت نشد.")
+    return {"ok": True, "stats": result}
+
 
 def update_listing_status(listing_id, payload, filters):
     rows = sb_request(
@@ -1110,6 +1144,10 @@ class handler(BaseHTTPRequestHandler):
         try:
             query = parse_qs(self.path.split("?", 1)[1]) if "?" in self.path else {}
             action = query.get("action", [""])[0]
+            if action == "admin_dashboard_stats":
+                user = authenticate_user(self)
+                respond(self, 200, get_admin_dashboard_stats(user))
+                return
             if action == "site_slogans":
                 respond(self, 200, {"ok": True, "settings": get_site_slogan_settings()})
                 return
@@ -1162,8 +1200,11 @@ class handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         try:
-            user = authenticate_user(self)
             fields, uploads = parse_body(self)
+            if fields.get("action") == "track_site_visit":
+                respond(self, 202, record_site_visit(fields))
+                return
+            user = authenticate_user(self)
             if fields.get("action") == "admin_site_slogans_save":
                 respond(self, 200, save_admin_site_slogans(user, fields))
                 return
