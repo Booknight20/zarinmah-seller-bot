@@ -420,6 +420,7 @@ def get_account_data(user, query=None):
         "role": role,
         "listings": listings,
         "purchase_requests": requests_rows,
+        "payment_orders": payment_orders,
         "pagination": {
             "per_page": per_page,
             "listings": {
@@ -760,6 +761,8 @@ def admin_listing_action(user, data):
     deleted = bool(listing.get("deleted_at"))
     status = listing.get("status")
     if action == "publish":
+        if listing.get("payment_status") == "awaiting_payment":
+            raise ValueError("ابتدا باید پرداخت آگهی تأیید شود؛ سپس امکان انتشار وجود دارد.")
         if deleted or status != "pending":
             raise ValueError("فقط آگهی در انتظار و حذف‌نشده قابل انتشار است.")
         patch, filters = {"status": "published", "published_at": now_iso()}, {"id": f"eq.{listing_id}", "status": "eq.pending", "deleted_at": "is.null"}
@@ -1209,6 +1212,191 @@ def send_invoice_to_admin(upload, listing_id):
     return result["result"]
 
 
+
+def get_site_setting(setting_key, default=None):
+    rows = sb_request("GET", "/rest/v1/zarinmah_site_settings", params={
+        "setting_key": "eq." + clean(setting_key, 80), "select": "setting_value", "limit": "1",
+    }) or []
+    return rows[0].get("setting_value") if rows else (default or {})
+
+
+DEFAULT_SELLER_PAYMENT_CONFIG = {
+    "method": "manual_card_transfer", "enabled": False, "card_number": "",
+    "card_owner": "", "instructions": "پس از واریز وجه، تصویر رسید و شماره پیگیری را ثبت کنید. فعال‌سازی پس از بررسی مدیر انجام می‌شود.",
+    "receipt_deadline_hours": 24, "gateway_enabled": False, "gateway_provider": None,
+}
+DEFAULT_SELLER_TARIFF_CONFIG = {"free_listing_quota": 3, "listing_price_toman": 25000, "listing_duration_days": 30, "packages": []}
+
+
+def get_seller_payment_config():
+    value = get_site_setting("seller_payment_config", DEFAULT_SELLER_PAYMENT_CONFIG)
+    return {**DEFAULT_SELLER_PAYMENT_CONFIG, **(value if isinstance(value, dict) else {})}
+
+
+def get_seller_tariff_config():
+    value = get_site_setting("seller_tariff_config", DEFAULT_SELLER_TARIFF_CONFIG)
+    return {**DEFAULT_SELLER_TARIFF_CONFIG, **(value if isinstance(value, dict) else {})}
+
+
+def admin_get_payment_settings(user):
+    require_admin(user)
+    return {"ok": True, "payment": get_seller_payment_config(), "tariff": get_seller_tariff_config()}
+
+
+def admin_save_setting(user, key, value, action):
+    require_admin(user)
+    old_value = get_site_setting(key, {})
+    sb_request("POST", "/rest/v1/zarinmah_site_settings",
+        params={"on_conflict": "setting_key"},
+        payload={"setting_key": key, "setting_value": value, "updated_by": user["id"], "updated_at": now_iso()},
+        prefer="resolution=merge-duplicates,return=representation", user_token=user.get("access_token"))
+    record_admin_audit(user, user["id"], action, {"setting": key, "value": old_value}, {"setting": key, "value": value})
+    return {"ok": True, "message": "تنظیمات با موفقیت ذخیره شد."}
+
+
+def admin_save_payment_settings(user, fields):
+    card_number = phone_digits(fields.get("card_number"))
+    card_owner = clean(fields.get("card_owner"), 100)
+    instructions = clean(fields.get("instructions"), 700)
+    try:
+        deadline = int(digits(fields.get("receipt_deadline_hours") or 24))
+    except (TypeError, ValueError):
+        raise ValueError("مهلت ارسال رسید معتبر نیست.")
+    enabled = str(fields.get("enabled") or "").lower() in ("1", "true", "on", "yes")
+    if card_number and not re.fullmatch(r"\\d{16}", card_number):
+        raise ValueError("شماره کارت باید ۱۶ رقم باشد.")
+    if not 1 <= deadline <= 168:
+        raise ValueError("مهلت ارسال رسید باید بین ۱ تا ۱۶۸ ساعت باشد.")
+    if enabled and (not re.fullmatch(r"\\d{16}", card_number) or len(card_owner) < 3):
+        raise ValueError("برای فعال‌کردن کارت‌به‌کارت، شماره کارت ۱۶ رقمی و نام صاحب کارت را وارد کنید.")
+    value = {
+        "method": "manual_card_transfer", "enabled": enabled,
+        "card_number": card_number, "card_owner": card_owner,
+        "instructions": instructions or DEFAULT_SELLER_PAYMENT_CONFIG["instructions"],
+        "receipt_deadline_hours": deadline, "gateway_enabled": False, "gateway_provider": None,
+    }
+    return admin_save_setting(user, "seller_payment_config", value, "seller_payment_config_update")
+
+
+def admin_save_tariff_settings(user, fields):
+    try:
+        quota = int(digits(fields.get("free_listing_quota")))
+        price = int(digits(fields.get("listing_price_toman")))
+        days = int(digits(fields.get("listing_duration_days")))
+    except (TypeError, ValueError):
+        raise ValueError("مقادیر تعرفه باید عددی باشند.")
+    if not 0 <= quota <= 100: raise ValueError("سهمیه رایگان باید بین صفر تا ۱۰۰ آگهی باشد.")
+    if not 0 <= price <= 1000000000: raise ValueError("مبلغ تعرفه معتبر نیست.")
+    if not 1 <= days <= 365: raise ValueError("مدت نمایش باید بین ۱ تا ۳۶۵ روز باشد.")
+    value = get_seller_tariff_config()
+    value.update({"free_listing_quota": quota, "listing_price_toman": price, "listing_duration_days": days})
+    return admin_save_setting(user, "seller_tariff_config", value, "seller_tariff_config_update")
+
+
+def get_admin_payment_orders(user):
+    require_admin(user)
+    rows = sb_request("GET", "/rest/v1/seller_payment_orders", params={
+        "select": "*", "order": "created_at.desc", "limit": "100",
+    }, user_token=user.get("access_token")) or []
+    user_ids = list(dict.fromkeys(str(row.get("user_id")) for row in rows if row.get("user_id")))
+    profiles = {}
+    if user_ids:
+        profile_rows = sb_request("GET", "/rest/v1/profiles", params={
+            "id": "in.(" + ",".join(user_ids) + ")", "select": "id,full_name,mobile,username",
+        }, user_token=user.get("access_token")) or []
+        profiles = {str(row["id"]): row for row in profile_rows}
+    for row in rows:
+        row["customer"] = profiles.get(str(row.get("user_id")), {})
+        path = clean(row.get("receipt_path"), 600)
+        if path:
+            try:
+                encoded = "/".join(quote(part, safe="") for part in path.split("/"))
+                signed = sb_request("POST", f"/storage/v1/object/sign/payment-receipts/{encoded}",
+                    payload={"expiresIn": 900}, user_token=user.get("access_token")) or {}
+                url = signed.get("signedURL") or signed.get("signedUrl")
+                if url:
+                    row["receipt_url"] = SUPABASE_URL + url if url.startswith("/") else url
+            except Exception as exc:
+                print("PAYMENT_RECEIPT_SIGN_FAILED:", str(exc)[:180])
+    return {"ok": True, "payments": rows}
+
+
+def submit_payment_receipt(user, fields, uploads):
+    require_complete_profile(user, access_token=user.get("access_token"))
+    try:
+        order_id = int(digits(fields.get("payment_order_id") or 0))
+        amount = int(digits(fields.get("amount_toman") or 0))
+    except (TypeError, ValueError):
+        raise ValueError("شناسه سفارش یا مبلغ واریزی معتبر نیست.")
+    payer_name = clean(fields.get("payer_name"), 100)
+    tracking_code = clean(fields.get("tracking_code"), 100)
+    if len(payer_name) < 3 or len(tracking_code) < 4:
+        raise ValueError("نام پرداخت‌کننده و شماره پیگیری معتبر را وارد کنید.")
+    receipt = check_file(uploads.get("payment_receipt"), {
+        "image/jpeg", "image/png", "image/webp", "application/pdf"
+    }, "تصویر رسید پرداخت")
+    if not sniff_invoice(receipt["data"]):
+        raise ValueError("محتوای فایل رسید معتبر نیست.")
+    orders = sb_request("GET", "/rest/v1/seller_payment_orders", params={
+        "id": "eq." + str(order_id), "user_id": "eq." + str(user["id"]),
+        "select": "id,user_id,amount_toman,status,receipt_path", "limit": "1",
+    }) or []
+    if not orders: raise ValueError("سفارش پرداخت پیدا نشد یا متعلق به حساب شما نیست.")
+    order = orders[0]
+    if order.get("status") not in ("awaiting_receipt", "rejected"):
+        raise ValueError("این سفارش در وضعیت دریافت رسید نیست.")
+    if amount != int(order.get("amount_toman") or 0):
+        raise ValueError("مبلغ واریزی با مبلغ سفارش مطابقت ندارد.")
+    ext = {"application/pdf":"pdf","image/jpeg":"jpg","image/png":"png","image/webp":"webp"}[receipt["content_type"]]
+    path = f"{user['id']}/{order_id}-{uuid.uuid4().hex}.{ext}"
+    upload_storage("payment-receipts", path, receipt["data"], receipt["content_type"])
+    updated = sb_request("PATCH", "/rest/v1/seller_payment_orders",
+        params={"id": "eq." + str(order_id), "user_id": "eq." + str(user["id"])},
+        payload={"payer_name": payer_name, "tracking_code": tracking_code, "receipt_path": path,
+                 "status": "under_review", "rejection_reason": None, "updated_at": now_iso()},
+        prefer="return=representation") or []
+    if not updated:
+        delete_storage("payment-receipts", path)
+        raise RuntimeError("ثبت رسید در پایگاه داده ناموفق بود.")
+    old_path = clean(order.get("receipt_path"), 600)
+    if old_path and old_path != path: delete_storage("payment-receipts", old_path)
+    return {"ok": True, "payment_order": updated[0], "message": "رسید دریافت شد و پس از بررسی مدیر نتیجه اعلام می‌شود."}
+
+
+def admin_review_payment(user, fields):
+    require_admin(user)
+    try: order_id = int(digits(fields.get("payment_order_id") or 0))
+    except (TypeError, ValueError): raise ValueError("شناسه پرداخت معتبر نیست.")
+    action = clean(fields.get("review_action"), 20)
+    reason = clean(fields.get("rejection_reason"), 500)
+    if action not in ("approve", "reject"): raise ValueError("عملیات بررسی پرداخت معتبر نیست.")
+    rows = sb_request("GET", "/rest/v1/seller_payment_orders", params={
+        "id": "eq." + str(order_id), "select": "*", "limit": "1",
+    }) or []
+    if not rows: raise ValueError("سفارش پرداخت پیدا نشد.")
+    order = rows[0]
+    if order.get("status") != "under_review" or not order.get("receipt_path"):
+        raise ValueError("فقط رسیدهای ارسال‌شده و در انتظار بررسی قابل تصمیم‌گیری هستند.")
+    if action == "reject" and len(reason) < 4: raise ValueError("برای رد رسید، دلیل کوتاهی وارد کنید.")
+    new_status = "approved" if action == "approve" else "rejected"
+    updated = sb_request("PATCH", "/rest/v1/seller_payment_orders",
+        params={"id": "eq." + str(order_id), "status": "eq.under_review"},
+        payload={"status": new_status, "reviewed_by": user["id"], "reviewed_at": now_iso(),
+                 "updated_at": now_iso(), "rejection_reason": None if action == "approve" else reason},
+        prefer="return=representation") or []
+    if not updated: raise ValueError("وضعیت سفارش تغییر کرده است؛ فهرست را تازه‌سازی کنید.")
+    if order.get("purpose") == "listing_fee" and order.get("listing_id"):
+        sb_request("PATCH", "/rest/v1/listings",
+            params={"id": "eq." + str(order["listing_id"]), "owner_user_id": "eq." + str(order["user_id"]),
+                    "payment_status": "eq.awaiting_payment"},
+            payload={"payment_status": "paid", "updated_at": now_iso()},
+            prefer="return=representation")
+    record_admin_audit(user, order.get("user_id"), "seller_payment_" + action,
+        {"payment_order_id": order_id, "status": order.get("status")},
+        {"payment_order_id": order_id, "status": new_status, "reason": reason if action == "reject" else None})
+    return {"ok": True, "payment_order": updated[0], "message": "پرداخت تأیید شد." if action == "approve" else "رسید رد شد."}
+
+
 def create_listing(fields, uploads, user):
     profile = require_complete_profile(user)
     photo = check_file(uploads.get("sellerPhoto") or uploads.get("photo"), {"image/jpeg", "image/png", "image/webp"}, "عکس محصول")
@@ -1237,6 +1425,26 @@ def create_listing(fields, uploads, user):
 
     product_type, weight, weight_unit, purity = product_details(fields)
     pricing_method, pricing_value, price, price_label = pricing_details(fields)
+
+    tariff = get_seller_tariff_config()
+    payment_config = get_seller_payment_config()
+    try:
+        free_quota = max(0, min(100, int(tariff.get("free_listing_quota", 3))))
+        listing_fee = max(0, int(tariff.get("listing_price_toman", 25000)))
+        listing_duration = max(1, min(365, int(tariff.get("listing_duration_days", 30))))
+    except (TypeError, ValueError):
+        raise RuntimeError("تنظیمات تعرفه فروشندگان معتبر نیست.")
+    _, seller_listing_count = sb_request_counted("/rest/v1/listings", {
+        "owner_user_id": "eq." + str(user["id"]), "deleted_at": "is.null",
+        "status": "in.(pending,published,sold)", "select": "id", "limit": "1",
+    }, access_token=user.get("access_token"))
+    payment_required = seller_listing_count >= free_quota and listing_fee > 0
+    if payment_required and not (
+        payment_config.get("enabled") is True
+        and re.fullmatch(r"\\d{16}", phone_digits(payment_config.get("card_number")))
+        and clean(payment_config.get("card_owner"), 100)
+    ):
+        raise ValueError("سهمیه آگهی رایگان شما به پایان رسیده است. دریافت پرداخت فعلاً از طرف مدیر غیرفعال است؛ لطفاً بعداً مراجعه کنید.")
     title = clean(fields.get("title"), 150) or product_type
     token = uuid.uuid4().hex
     photo_ext = {"image/jpeg": "jpg", "image/png": "png", "image/webp": "webp"}[photo["content_type"]]
@@ -1244,6 +1452,7 @@ def create_listing(fields, uploads, user):
     photo_path = f"website/{token}.{photo_ext}"
     invoice_path = f"website/{token}.{invoice_ext}"
     photo_uploaded = invoice_uploaded = False
+    created_listing_id = None
     try:
         image_url = upload_storage("listing-images", photo_path, photo["data"], photo["content_type"])
         photo_uploaded = True
@@ -1262,6 +1471,7 @@ def create_listing(fields, uploads, user):
             "description": description,
             "image_url": image_url,
             "status": "pending",
+            "payment_status": "awaiting_payment" if payment_required else "free",
             "created_at": now_iso(),
             "updated_at": now_iso(),
             "seller_name": seller_name,
@@ -1276,6 +1486,19 @@ def create_listing(fields, uploads, user):
             raise RuntimeError("شناسه آگهی از Supabase دریافت نشد.")
         record = inserted[0]
         listing_id = int(record["id"])
+        created_listing_id = listing_id
+        payment_order = None
+        if payment_required:
+            order_rows = sb_request("POST", "/rest/v1/seller_payment_orders", payload={
+                "user_id": user["id"], "purpose": "listing_fee", "listing_id": listing_id,
+                "amount_toman": listing_fee, "payment_method": "manual_card_transfer",
+                "provider": "manual_card_transfer", "status": "awaiting_receipt",
+                "metadata": {"listing_title": title, "display_duration_days": listing_duration},
+            }, prefer="return=representation")
+            if not order_rows: raise RuntimeError("ساخت سفارش پرداخت ناموفق بود.")
+            payment_order = order_rows[0]
+            sb_request("PATCH", "/rest/v1/listings", params={"id": "eq." + str(listing_id)},
+                payload={"payment_order_id": payment_order["id"]}, prefer="return=minimal")
         listing = {
             "id": listing_id, "seller_name": seller_name, "seller_mobile": seller_mobile,
             "product_type": product_type, "weight": weight, "weight_unit": weight_unit,
@@ -1286,6 +1509,19 @@ def create_listing(fields, uploads, user):
             "_price_label": price_label,
             "image_url": image_url,
         }
+        if payment_required:
+            return {
+                "id": listing_id, "status": "pending", "payment_required": True,
+                "payment_order": {"id": payment_order["id"], "amount_toman": listing_fee,
+                                  "purpose": "listing_fee", "status": "awaiting_receipt"},
+                "payment_config": {"method": "manual_card_transfer",
+                    "card_number": payment_config.get("card_number"),
+                    "card_owner": payment_config.get("card_owner"),
+                    "instructions": payment_config.get("instructions"),
+                    "receipt_deadline_hours": payment_config.get("receipt_deadline_hours", 24)},
+                "admin_notification_sent": False, "invoice_sent": False,
+                "message": "آگهی ذخیره شد اما تا تأیید پرداخت منتشر نمی‌شود. ابتدا مبلغ را کارت‌به‌کارت و رسید را ثبت کنید.",
+            }
         invoice_sent = False
         try:
             send_invoice_to_admin(invoice, listing_id)
@@ -1304,6 +1540,11 @@ def create_listing(fields, uploads, user):
             "message": "آگهی در پایگاه داده ذخیره شد و در انتظار بررسی مدیر است. اگر پیام مدیر ارسال نشد، آگهی را دوباره ثبت نکنید.",
         }
     except Exception:
+        if created_listing_id:
+            try:
+                sb_request("DELETE", "/rest/v1/listings", params={"id": "eq." + str(created_listing_id)})
+            except Exception as cleanup_error:
+                print("LISTING CLEANUP FAILED:", str(cleanup_error)[:180])
         if invoice_uploaded:
             delete_storage("listing-invoices", invoice_path)
         if photo_uploaded:
@@ -1420,6 +1661,14 @@ class handler(BaseHTTPRequestHandler):
         try:
             query = parse_qs(self.path.split("?", 1)[1]) if "?" in self.path else {}
             action = query.get("action", [""])[0]
+            if action == "admin_payment_settings":
+                user = authenticate_user(self)
+                respond(self, 200, admin_get_payment_settings(user))
+                return
+            if action == "admin_payments":
+                user = authenticate_user(self)
+                respond(self, 200, get_admin_payment_orders(user))
+                return
             if action == "admin_dashboard_stats":
                 user = authenticate_user(self)
                 respond(self, 200, get_admin_dashboard_stats(user))
@@ -1501,6 +1750,18 @@ class handler(BaseHTTPRequestHandler):
                 respond(self, 202, record_site_visit(fields))
                 return
             user = authenticate_user(self)
+            if fields.get("action") == "admin_payment_settings_save":
+                respond(self, 200, admin_save_payment_settings(user, fields))
+                return
+            if fields.get("action") == "admin_tariff_settings_save":
+                respond(self, 200, admin_save_tariff_settings(user, fields))
+                return
+            if fields.get("action") == "submit_payment_receipt":
+                respond(self, 200, submit_payment_receipt(user, fields, uploads))
+                return
+            if fields.get("action") == "admin_payment_review":
+                respond(self, 200, admin_review_payment(user, fields))
+                return
             if fields.get("action") == "admin_site_slogans_save":
                 respond(self, 200, save_admin_site_slogans(user, fields))
                 return
