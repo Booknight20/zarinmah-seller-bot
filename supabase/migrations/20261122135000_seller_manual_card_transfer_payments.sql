@@ -247,3 +247,44 @@ end;
 $$;
 revoke all on function public.zarinmah_owner_set_listing_status(bigint,text) from public,anon;
 grant execute on function public.zarinmah_owner_set_listing_status(bigint,text) to authenticated;
+
+
+create or replace function public.zarinmah_admin_review_seller_payment(
+  p_order_id bigint,p_action text,p_rejection_reason text default null
+)
+returns jsonb language plpgsql security definer
+set search_path=pg_catalog,public,auth,private
+as $$
+declare
+  v_user_id uuid:=auth.uid();
+  v_order public.seller_payment_orders%rowtype;
+  v_listing_id bigint;
+  v_reason text:=trim(coalesce(p_rejection_reason,''));
+  v_new_status text;
+begin
+  if v_user_id is null or not private.zarinmah_is_admin() then
+    raise exception 'فقط مدیرکل می‌تواند رسید پرداخت را بررسی کند.';
+  end if;
+  if p_action not in ('approve','reject') then raise exception 'عملیات بررسی پرداخت معتبر نیست.'; end if;
+  select * into v_order from public.seller_payment_orders where id=p_order_id for update;
+  if not found then raise exception 'سفارش پرداخت پیدا نشد.'; end if;
+  if v_order.status<>'under_review' or v_order.receipt_path is null then
+    raise exception 'فقط رسیدهای ارسال‌شده و در انتظار بررسی قابل تصمیم‌گیری هستند.';
+  end if;
+  if p_action='reject' and length(v_reason)<4 then raise exception 'برای رد رسید، دلیل کوتاهی وارد کنید.'; end if;
+  v_new_status:=case when p_action='approve' then 'approved' else 'rejected' end;
+  if p_action='approve' and v_order.purpose='listing_fee' and v_order.listing_id is not null then
+    update public.listings set payment_status='paid',updated_at=now()
+      where id=v_order.listing_id and owner_user_id=v_order.user_id and payment_status='awaiting_payment'
+      returning id into v_listing_id;
+    if v_listing_id is null then raise exception 'آگهی مرتبط پیدا نشد یا وضعیت پرداخت آن تغییر کرده است.'; end if;
+  end if;
+  update public.seller_payment_orders
+    set status=v_new_status,reviewed_by=v_user_id,reviewed_at=now(),updated_at=now(),
+        rejection_reason=case when p_action='reject' then v_reason else null end
+    where id=p_order_id returning * into v_order;
+  return to_jsonb(v_order);
+end;
+$$;
+revoke all on function public.zarinmah_admin_review_seller_payment(bigint,text,text) from public,anon;
+grant execute on function public.zarinmah_admin_review_seller_payment(bigint,text,text) to authenticated;
