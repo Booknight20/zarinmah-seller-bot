@@ -414,6 +414,11 @@ def get_account_data(user, query=None):
         if not admin:
             request_row.pop("buyer_mobile", None)
 
+    payment_orders = sb_request("GET", "/rest/v1/seller_payment_orders", params={
+        "select": "id,purpose,listing_id,package_name,amount_toman,payment_method,status,payer_name,tracking_code,rejection_reason,created_at,updated_at,reviewed_at",
+        "user_id": "eq." + str(user["id"]), "order": "created_at.desc", "limit": "50",
+    }, user_token=access_token) or []
+
     return {
         "ok": True,
         "profile": profile,
@@ -1263,7 +1268,7 @@ def admin_save_payment_settings(user, fields):
     except (TypeError, ValueError):
         raise ValueError("مهلت ارسال رسید معتبر نیست.")
     enabled = str(fields.get("enabled") or "").lower() in ("1", "true", "on", "yes")
-    if card_number and not re.fullmatch(r"\\d{16}", card_number):
+    if card_number and not re.fullmatch(r"\d{16}", card_number):
         raise ValueError("شماره کارت باید ۱۶ رقم باشد.")
     if not 1 <= deadline <= 168:
         raise ValueError("مهلت ارسال رسید باید بین ۱ تا ۱۶۸ ساعت باشد.")
@@ -1441,7 +1446,7 @@ def create_listing(fields, uploads, user):
     payment_required = seller_listing_count >= free_quota and listing_fee > 0
     if payment_required and not (
         payment_config.get("enabled") is True
-        and re.fullmatch(r"\\d{16}", phone_digits(payment_config.get("card_number")))
+        and re.fullmatch(r"\d{16}", phone_digits(payment_config.get("card_number")))
         and clean(payment_config.get("card_owner"), 100)
     ):
         raise ValueError("سهمیه آگهی رایگان شما به پایان رسیده است. دریافت پرداخت فعلاً از طرف مدیر غیرفعال است؛ لطفاً بعداً مراجعه کنید.")
