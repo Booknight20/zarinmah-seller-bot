@@ -609,11 +609,16 @@ def admin_member_update(user, data):
     }, user_token=access_token) or []
     if not old_rows: raise ValueError("عضو پیدا نشد.")
     rows = sb_request("PATCH", "/rest/v1/profiles", params={"id": "eq." + member_id},
-        payload={"full_name": full_name, "is_active": active_value, "updated_at": now_iso()},
+        payload={"full_name": full_name, "updated_at": now_iso()},
         prefer="return=representation", user_token=access_token) or []
     if not rows: raise ValueError("عضو پیدا نشد یا اطلاعات او به‌روزرسانی نشد.")
+    previous_active = bool(old_rows[0].get("is_active"))
+    if previous_active != active_value:
+        sb_request("POST", "/rest/v1/rpc/zarinmah_admin_set_member_active",
+            payload={"p_member_id": member_id, "p_is_active": active_value},
+            user_token=access_token)
     record_admin_audit(user, member_id, "member_profile_update",
-        {"full_name": old_rows[0].get("full_name"), "is_active": old_rows[0].get("is_active")},
+        {"full_name": old_rows[0].get("full_name"), "is_active": previous_active},
         {"full_name": full_name, "is_active": active_value})
     return {"ok": True, "member": rows[0], "message": "اطلاعات عضو به‌روزرسانی شد."}
 
