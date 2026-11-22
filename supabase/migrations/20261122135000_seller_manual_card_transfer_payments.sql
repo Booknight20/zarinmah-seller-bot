@@ -77,6 +77,14 @@ create policy "Members can upload own listing photos" on storage.objects
 drop policy if exists "Members can upload own listing invoices" on storage.objects;
 create policy "Members can upload own listing invoices" on storage.objects
   for insert to authenticated with check (bucket_id='listing-invoices' and owner_id=(select auth.uid())::text);
+drop policy if exists "Admins can read payment receipts" on storage.objects;
+create policy "Admins can read payment receipts" on storage.objects
+  for select to authenticated using (bucket_id='payment-receipts' and private.zarinmah_is_admin());
+drop policy if exists "Admins can manage payment receipts" on storage.objects;
+create policy "Admins can manage payment receipts" on storage.objects
+  for all to authenticated using (bucket_id='payment-receipts' and private.zarinmah_is_admin())
+  with check (bucket_id='payment-receipts' and private.zarinmah_is_admin());
+
 drop policy if exists "Members can upload own payment receipts" on storage.objects;
 create policy "Members can upload own payment receipts" on storage.objects
   for insert to authenticated with check (bucket_id='payment-receipts' and owner_id=(select auth.uid())::text);
