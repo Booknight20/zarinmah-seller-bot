@@ -1125,8 +1125,8 @@ class handler(BaseHTTPRequestHandler):
                 return
             if action == "profile":
                 user = authenticate_user(self)
-                profile = get_user_profile(user, access_token=user.get("access_token"))
-                role = get_user_role(user, access_token=user.get("access_token")) if profile else "user"
+                profile = get_user_profile(user)
+                role = get_user_role(user) if profile else "user"
                 respond(self, 200, {"ok": True, "profile": profile, "role": role})
                 return
             if action == "account":
