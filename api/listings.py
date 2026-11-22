@@ -1381,36 +1381,35 @@ def submit_payment_receipt(user, fields, uploads):
 
 def admin_review_payment(user, fields):
     require_admin(user)
-    try: order_id = int(digits(fields.get("payment_order_id") or 0))
-    except (TypeError, ValueError): raise ValueError("شناسه پرداخت معتبر نیست.")
+    try:
+        order_id = int(digits(fields.get("payment_order_id") or 0))
+    except (TypeError, ValueError):
+        raise ValueError("شناسه پرداخت معتبر نیست.")
     action = clean(fields.get("review_action"), 20)
     reason = clean(fields.get("rejection_reason"), 500)
-    if action not in ("approve", "reject"): raise ValueError("عملیات بررسی پرداخت معتبر نیست.")
+    if action not in ("approve", "reject"):
+        raise ValueError("عملیات بررسی پرداخت معتبر نیست.")
     rows = sb_request("GET", "/rest/v1/seller_payment_orders", params={
         "id": "eq." + str(order_id), "select": "*", "limit": "1",
     }, user_token=user.get("access_token")) or []
-    if not rows: raise ValueError("سفارش پرداخت پیدا نشد.")
+    if not rows:
+        raise ValueError("سفارش پرداخت پیدا نشد.")
     order = rows[0]
     if order.get("status") != "under_review" or not order.get("receipt_path"):
         raise ValueError("فقط رسیدهای ارسال‌شده و در انتظار بررسی قابل تصمیم‌گیری هستند.")
-    if action == "reject" and len(reason) < 4: raise ValueError("برای رد رسید، دلیل کوتاهی وارد کنید.")
+    if action == "reject" and len(reason) < 4:
+        raise ValueError("برای رد رسید، دلیل کوتاهی وارد کنید.")
+    updated = sb_request("POST", "/rest/v1/rpc/zarinmah_admin_review_seller_payment", payload={
+        "p_order_id": order_id, "p_action": action, "p_rejection_reason": reason,
+    }, user_token=user.get("access_token")) or {}
+    if not updated:
+        raise ValueError("ثبت نتیجه بررسی پرداخت ناموفق بود.")
     new_status = "approved" if action == "approve" else "rejected"
-    updated = sb_request("PATCH", "/rest/v1/seller_payment_orders",
-        params={"id": "eq." + str(order_id), "status": "eq.under_review"},
-        payload={"status": new_status, "reviewed_by": user["id"], "reviewed_at": now_iso(),
-                 "updated_at": now_iso(), "rejection_reason": None if action == "approve" else reason},
-        prefer="return=representation", user_token=user.get("access_token")) or []
-    if not updated: raise ValueError("وضعیت سفارش تغییر کرده است؛ فهرست را تازه‌سازی کنید.")
-    if order.get("purpose") == "listing_fee" and order.get("listing_id"):
-        sb_request("PATCH", "/rest/v1/listings",
-            params={"id": "eq." + str(order["listing_id"]), "owner_user_id": "eq." + str(order["user_id"]),
-                    "payment_status": "eq.awaiting_payment"},
-            payload={"payment_status": "paid", "updated_at": now_iso()},
-            prefer="return=representation", user_token=user.get("access_token"))
     record_admin_audit(user, order.get("user_id"), "seller_payment_" + action,
         {"payment_order_id": order_id, "status": order.get("status")},
         {"payment_order_id": order_id, "status": new_status, "reason": reason if action == "reject" else None})
-    return {"ok": True, "payment_order": updated[0], "message": "پرداخت تأیید شد." if action == "approve" else "رسید رد شد."}
+    return {"ok": True, "payment_order": updated,
+            "message": "پرداخت تأیید شد." if action == "approve" else "رسید رد شد."}
 
 
 def create_listing(fields, uploads, user):
