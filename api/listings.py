@@ -1326,7 +1326,11 @@ def get_admin_payment_orders(user):
                     payload={"expiresIn": 900}, user_token=user.get("access_token")) or {}
                 url = signed.get("signedURL") or signed.get("signedUrl")
                 if url:
-                    row["receipt_url"] = SUPABASE_URL + url if url.startswith("/") else url
+                    if url.startswith("/object/"):
+                        url = SUPABASE_URL + "/storage/v1" + url
+                    elif url.startswith("/"):
+                        url = SUPABASE_URL + url
+                    row["receipt_url"] = url
             except Exception as exc:
                 print("PAYMENT_RECEIPT_SIGN_FAILED:", str(exc)[:180])
     return {"ok": True, "payments": rows}
