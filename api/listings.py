@@ -418,6 +418,12 @@ def get_account_data(user, query=None):
         "select": "id,purpose,listing_id,package_name,amount_toman,payment_method,status,payer_name,tracking_code,rejection_reason,metadata,created_at,updated_at,reviewed_at",
         "user_id": "eq." + str(user["id"]), "order": "created_at.desc", "limit": "50",
     }, user_token=access_token) or []
+    subscriptions = sb_request("GET", "/rest/v1/seller_subscriptions", params={
+        "select": "id,package_code,package_name,price_toman,listing_limit,starts_at,ends_at,status,created_at",
+        "user_id": "eq." + str(user["id"]), "order": "ends_at.desc", "limit": "20",
+    }, user_token=access_token) or []
+    tariff_config = get_seller_tariff_config(access_token)
+    active_packages = [p for p in tariff_config.get("packages", []) if isinstance(p, dict) and p.get("active") is True]
 
     return {
         "ok": True,
@@ -427,6 +433,8 @@ def get_account_data(user, query=None):
         "purchase_requests": requests_rows,
         "payment_orders": payment_orders,
         "payment_config": get_seller_payment_config(access_token),
+        "seller_packages": active_packages,
+        "seller_subscriptions": subscriptions,
         "pagination": {
             "per_page": per_page,
             "listings": {
@@ -1300,8 +1308,49 @@ def admin_save_tariff_settings(user, fields):
     if not 0 <= price <= 1000000000: raise ValueError("مبلغ تعرفه معتبر نیست.")
     if not 1 <= days <= 365: raise ValueError("مدت نمایش باید بین ۱ تا ۳۶۵ روز باشد.")
     value = get_seller_tariff_config(user.get("access_token"))
+    packages_raw = fields.get("packages_json")
+    if packages_raw is not None:
+        try:
+            packages_input = json.loads(packages_raw or "[]")
+        except (TypeError, ValueError):
+            raise ValueError("فهرست طرح‌های اشتراک معتبر نیست.")
+        if not isinstance(packages_input, list) or len(packages_input) > 30:
+            raise ValueError("حداکثر ۳۰ طرح اشتراک قابل تعریف است.")
+        packages = []
+        seen = set()
+        for item in packages_input:
+            if not isinstance(item, dict): raise ValueError("اطلاعات یکی از طرح‌ها معتبر نیست.")
+            code = clean(item.get("code"), 32).lower()
+            name = clean(item.get("name"), 60)
+            try:
+                package_price = int(item.get("price_toman"))
+                listing_limit = int(item.get("listing_limit"))
+                duration_days = int(item.get("duration_days"))
+            except (TypeError, ValueError):
+                raise ValueError("قیمت، سقف آگهی و مدت هر طرح باید عددی باشد.")
+            if not re.fullmatch(r"[a-z0-9_-]{2,32}", code) or code in seen:
+                raise ValueError("شناسه طرح تکراری یا نامعتبر است.")
+            if not name or not 0 < package_price <= 1000000000 or not 1 <= listing_limit <= 10000 or not 1 <= duration_days <= 3650:
+                raise ValueError("مقادیر یکی از طرح‌ها خارج از محدوده مجاز است.")
+            seen.add(code)
+            packages.append({"code":code,"name":name,"price_toman":package_price,"listing_limit":listing_limit,
+                "duration_days":duration_days,"active":str(item.get("active")).lower() in ("true","1","yes")})
+        value["packages"] = packages
     value.update({"free_listing_quota": quota, "listing_price_toman": price, "listing_duration_days": days})
-    return admin_save_setting(user, "seller_tariff_config", value, "seller_tariff_config_update")
+    return admin_save_setting(user, "seller_tariff_config", value, "seller_tariff_and_packages_update")
+
+
+def create_seller_package_order(user, fields):
+    require_complete_profile(user, access_token=user.get("access_token"))
+    code = clean(fields.get("package_code"), 32).lower()
+    if not re.fullmatch(r"[a-z0-9_-]{2,32}", code):
+        raise ValueError("طرح انتخاب‌شده معتبر نیست.")
+    order = sb_request("POST", "/rest/v1/rpc/zarinmah_create_seller_package_order",
+        payload={"p_package_code": code}, user_token=user.get("access_token"))
+    if not isinstance(order, dict) or not order.get("id"):
+        raise RuntimeError("سفارش اشتراک ایجاد نشد.")
+    return {"ok": True, "payment_order": order,
+        "message": "سفارش اشتراک ایجاد شد. برای تکمیل خرید، مبلغ را کارت‌به‌کارت و رسید را در بخش پرداخت‌ها ارسال کنید."}
 
 
 def get_admin_payment_orders(user):
@@ -1737,6 +1786,9 @@ class handler(BaseHTTPRequestHandler):
                 return
             if fields.get("action") == "admin_tariff_settings_save":
                 respond(self, 200, admin_save_tariff_settings(user, fields))
+                return
+            if fields.get("action") == "create_seller_package_order":
+                respond(self, 201, create_seller_package_order(user, fields))
                 return
             if fields.get("action") == "submit_payment_receipt":
                 respond(self, 200, submit_payment_receipt(user, fields, uploads))
