@@ -1764,7 +1764,7 @@ class handler(BaseHTTPRequestHandler):
                 respond(self, 200, {"ok": True, "profile": profile, "message": "پروفایل شما با موفقیت تکمیل شد."})
                 return
             if fields.get("action") in ("admin_listing_action", "owner_listing_action", "admin_purchase_action"):
-                if PREVIEW_DRY_RUN:
+                if PREVIEW_DRY_RUN and fields.get("action") == "admin_purchase_action":
                     respond(self, 200, {"ok": True, "preview": True, "message": "اعتبارسنجی عملیات پنل در حالت آزمایشی انجام شد؛ تغییری ذخیره نشد."})
                     return
                 if fields.get("action") == "admin_listing_action":
@@ -1775,10 +1775,10 @@ class handler(BaseHTTPRequestHandler):
                     result = admin_purchase_action(user, fields)
                 respond(self, 200, result)
                 return
-            if PREVIEW_DRY_RUN:
+            if PREVIEW_DRY_RUN and not (uploads.get("sellerPhoto") and uploads.get("sellerInvoice")):
                 respond(self, 200, {
                     "ok": True, "preview": True,
-                    "message": "ورود و ارسال آزمایشی تأیید شد؛ در این نسخه هیچ آگهی، درخواست خرید یا پیام تلگرامی ذخیره و ارسال نشد.",
+                    "message": "این عملیات در حالت آزمایشی باقی مانده است؛ فقط ثبت آگهی فروشنده و مسیر پرداخت تأییدشده روی Staging فعال است.",
                 })
                 return
             if not uploads and fields.get("action") == "purchase":
