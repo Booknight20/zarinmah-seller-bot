@@ -800,13 +800,13 @@ def admin_listing_action(user, data):
 
 
 def owner_listing_action(user, data):
-    require_complete_profile(user)
+    require_complete_profile(user, access_token=user.get("access_token"))
     try:
         listing_id = int(data.get("listing_id", 0))
     except (TypeError, ValueError):
         raise ValueError("شناسه آگهی معتبر نیست.")
     action = clean(data.get("listing_action"), 30)
-    listing = get_listing(listing_id)
+    listing = get_listing(listing_id, user_token=user.get("access_token"))
     if not listing or str(listing.get("owner_user_id") or "") != str(user.get("id") or ""):
         raise ValueError("آگهی پیدا نشد یا متعلق به حساب شما نیست.")
     if listing.get("deleted_at"):
