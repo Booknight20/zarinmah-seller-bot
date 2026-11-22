@@ -971,7 +971,7 @@ def save_admin_banner(user, fields, uploads):
     image_url = old.get("image_url", "")
     storage_path = old.get("storage_path", "")
     if upload and upload.get("data"):
-        upload = check_file(upload, {"image/jpeg", "image/png", "image/webp"}, "تصویر بنر", max_size=2 * 1024 * 1024)
+        upload = check_file(upload, {"image/jpeg", "image/png", "image/webp"}, "تصویر بنر", max_size=MAX_FILE_SIZE)
         if not sniff_photo(upload["data"]):
             raise ValueError("محتوای تصویر بنر معتبر نیست.")
         ext = {"image/jpeg": "jpg", "image/png": "png", "image/webp": "webp"}[upload["content_type"]]
