@@ -1382,7 +1382,36 @@ def get_admin_payment_orders(user):
                     row["receipt_url"] = url
             except Exception as exc:
                 print("PAYMENT_RECEIPT_SIGN_FAILED:", str(exc)[:180])
-    return {"ok": True, "payments": rows}
+    subscriptions = sb_request("GET", "/rest/v1/seller_subscriptions", params={
+        "select": "id,user_id,package_code,package_name,price_toman,listing_limit,starts_at,ends_at,status,created_at,payment_order_id",
+        "order": "ends_at.desc", "limit": "200",
+    }, user_token=user.get("access_token")) or []
+    for sub in subscriptions:
+        sub["customer"] = profiles.get(str(sub.get("user_id")), {})
+    return {"ok": True, "payments": rows, "subscriptions": subscriptions}
+
+
+def admin_manage_seller_subscription(user, fields):
+    require_admin(user)
+    try:
+        subscription_id = int(digits(fields.get("subscription_id") or 0))
+        days = int(digits(fields.get("days") or 30))
+    except (TypeError, ValueError):
+        raise ValueError("شناسه اشتراک یا مدت تمدید معتبر نیست.")
+    action = clean(fields.get("subscription_action"), 20)
+    if action not in ("extend", "cancel"):
+        raise ValueError("عملیات مدیریت اشتراک معتبر نیست.")
+    if action == "extend" and not 1 <= days <= 365:
+        raise ValueError("مدت تمدید باید بین ۱ تا ۳۶۵ روز باشد.")
+    updated = sb_request("POST", "/rest/v1/rpc/zarinmah_admin_manage_seller_subscription", payload={
+        "p_subscription_id": subscription_id, "p_action": action, "p_days": days,
+    }, user_token=user.get("access_token")) or {}
+    if not updated:
+        raise RuntimeError("به‌روزرسانی اشتراک ناموفق بود.")
+    record_admin_audit(user, updated.get("user_id"), "seller_subscription_" + action,
+        {"subscription_id": subscription_id}, {"subscription": updated})
+    return {"ok": True, "subscription": updated,
+        "message": "اشتراک تمدید شد." if action == "extend" else "اشتراک لغو شد."}
 
 
 def submit_payment_receipt(user, fields, uploads):
@@ -1795,6 +1824,9 @@ class handler(BaseHTTPRequestHandler):
                 return
             if fields.get("action") == "admin_payment_review":
                 respond(self, 200, admin_review_payment(user, fields))
+                return
+            if fields.get("action") == "admin_seller_subscription_action":
+                respond(self, 200, admin_manage_seller_subscription(user, fields))
                 return
             if fields.get("action") == "admin_site_slogans_save":
                 respond(self, 200, save_admin_site_slogans(user, fields))
