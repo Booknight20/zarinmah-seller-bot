@@ -265,7 +265,7 @@ begin
   if v_user_id is null or not private.zarinmah_is_admin() then
     raise exception 'فقط مدیرکل می‌تواند رسید پرداخت را بررسی کند.';
   end if;
-  if p_action not in ('approve','reject') then raise exception 'عملیات بررسی پرداخت معتبر نیست.'; end if;
+  if coalesce(p_action,'') not in ('approve','reject') then raise exception 'عملیات بررسی پرداخت معتبر نیست.'; end if;
   select * into v_order from public.seller_payment_orders where id=p_order_id for update;
   if not found then raise exception 'سفارش پرداخت پیدا نشد.'; end if;
   if v_order.status<>'under_review' or v_order.receipt_path is null then
