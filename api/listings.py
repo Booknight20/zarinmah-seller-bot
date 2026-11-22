@@ -742,16 +742,21 @@ def create_admin_invoice_link(user, listing_id):
     return {"ok": True, "url": signed, "expires_in": 90}
 
 
-def update_listing_status(listing_id, payload, filters):
-    rows = sb_request(
-        "PATCH", "/rest/v1/listings",
-        params=filters,
-        payload={**payload, "updated_at": now_iso()},
-        prefer="return=representation",
-    ) or []
-    if not rows:
+def update_listing_status(listing_id, payload, filters, user=None, owner=False):
+    action = "publish" if payload.get("status") == "published" else (
+        "sold" if payload.get("status") == "sold" else (
+            "restore" if "deleted_at" in payload and payload.get("deleted_at") is None else (
+                "delete" if payload.get("deleted_at") else "reject"
+            )
+        )
+    )
+    rpc = "zarinmah_owner_set_listing_status" if owner else "zarinmah_admin_set_listing_status"
+    result = sb_request("POST", "/rest/v1/rpc/" + rpc,
+        payload={"p_listing_id": int(listing_id), "p_action": action},
+        user_token=(user or {}).get("access_token")) or {}
+    if not result:
         raise ValueError("آگهی پیدا نشد یا اجازه تغییر آن را ندارید.")
-    return rows[0]
+    return result
 
 
 def admin_listing_action(user, data):
@@ -761,7 +766,7 @@ def admin_listing_action(user, data):
     except (TypeError, ValueError):
         raise ValueError("شناسه آگهی معتبر نیست.")
     action = clean(data.get("listing_action"), 30)
-    listing = get_listing(listing_id)
+    listing = get_listing(listing_id, user_token=user.get("access_token"))
     if not listing:
         raise ValueError("آگهی پیدا نشد.")
     deleted = bool(listing.get("deleted_at"))
@@ -790,7 +795,7 @@ def admin_listing_action(user, data):
         patch, filters = {"deleted_at": None}, {"id": f"eq.{listing_id}", "deleted_at": "not.is.null"}
     else:
         raise ValueError("عملیات مدیریتی آگهی معتبر نیست.")
-    row = update_listing_status(listing_id, patch, filters)
+    row = update_listing_status(listing_id, patch, filters, user=user)
     return {"ok": True, "listing": row, "message": "وضعیت آگهی به‌روزرسانی شد."}
 
 
@@ -814,7 +819,7 @@ def owner_listing_action(user, data):
         patch, filters = {"deleted_at": now_iso()}, {"id": f"eq.{listing_id}", "owner_user_id": f"eq.{user['id']}", "deleted_at": "is.null"}
     else:
         raise ValueError("عملیات آگهی معتبر نیست.")
-    row = update_listing_status(listing_id, patch, filters)
+    row = update_listing_status(listing_id, patch, filters, user=user, owner=True)
     return {"ok": True, "listing": row, "message": "آگهی شما به‌روزرسانی شد."}
 
 
@@ -1294,7 +1299,7 @@ def admin_save_tariff_settings(user, fields):
     if not 0 <= quota <= 100: raise ValueError("سهمیه رایگان باید بین صفر تا ۱۰۰ آگهی باشد.")
     if not 0 <= price <= 1000000000: raise ValueError("مبلغ تعرفه معتبر نیست.")
     if not 1 <= days <= 365: raise ValueError("مدت نمایش باید بین ۱ تا ۳۶۵ روز باشد.")
-    value = get_seller_tariff_config()
+    value = get_seller_tariff_config(user.get("access_token"))
     value.update({"free_listing_quota": quota, "listing_price_toman": price, "listing_duration_days": days})
     return admin_save_setting(user, "seller_tariff_config", value, "seller_tariff_config_update")
 
@@ -1526,10 +1531,10 @@ def create_listing(fields, uploads, user):
         raise
 
 
-def get_listing(listing_id):
+def get_listing(listing_id, user_token=None):
     rows = sb_request("GET", "/rest/v1/listings", params={
         "id": f"eq.{int(listing_id)}", "select": "*", "limit": "1",
-    }) or []
+    }, user_token=user_token) or []
     return rows[0] if rows else None
 
 
@@ -1564,7 +1569,7 @@ def save_purchase_request(data, user):
         listing_id = int(data.get("listing_id", 0))
     except (TypeError, ValueError):
         raise ValueError("شناسه آگهی معتبر نیست.")
-    listing = get_listing(listing_id)
+    listing = get_listing(listing_id, user_token=user.get("access_token"))
     if not listing or listing.get("status") != "published" or listing.get("deleted_at"):
         raise ValueError("این آگهی دیگر برای خرید در دسترس نیست.")
     buyer_name = clean(profile.get("full_name"), 100)
