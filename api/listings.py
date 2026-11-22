@@ -415,7 +415,7 @@ def get_account_data(user, query=None):
             request_row.pop("buyer_mobile", None)
 
     payment_orders = sb_request("GET", "/rest/v1/seller_payment_orders", params={
-        "select": "id,purpose,listing_id,package_name,amount_toman,payment_method,status,payer_name,tracking_code,rejection_reason,created_at,updated_at,reviewed_at",
+        "select": "id,purpose,listing_id,package_name,amount_toman,payment_method,status,payer_name,tracking_code,rejection_reason,metadata,created_at,updated_at,reviewed_at",
         "user_id": "eq." + str(user["id"]), "order": "created_at.desc", "limit": "50",
     }, user_token=access_token) or []
 
