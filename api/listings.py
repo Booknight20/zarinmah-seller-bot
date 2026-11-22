@@ -426,6 +426,7 @@ def get_account_data(user, query=None):
         "listings": listings,
         "purchase_requests": requests_rows,
         "payment_orders": payment_orders,
+        "payment_config": get_seller_payment_config(),
         "pagination": {
             "per_page": per_page,
             "listings": {
@@ -1272,7 +1273,7 @@ def admin_save_payment_settings(user, fields):
         raise ValueError("شماره کارت باید ۱۶ رقم باشد.")
     if not 1 <= deadline <= 168:
         raise ValueError("مهلت ارسال رسید باید بین ۱ تا ۱۶۸ ساعت باشد.")
-    if enabled and (not re.fullmatch(r"\\d{16}", card_number) or len(card_owner) < 3):
+    if enabled and (not re.fullmatch(r"\d{16}", card_number) or len(card_owner) < 3):
         raise ValueError("برای فعال‌کردن کارت‌به‌کارت، شماره کارت ۱۶ رقمی و نام صاحب کارت را وارد کنید.")
     value = {
         "method": "manual_card_transfer", "enabled": enabled,
